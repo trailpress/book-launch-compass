@@ -1,0 +1,4 @@
+project_id = "jobgvzinswtoeohlcddo"
+
+[functions.analyze-niche]
+verify_jwt = false

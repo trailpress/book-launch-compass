@@ -1,0 +1,1 @@
+UPDATE rate_limits SET request_count = 0, window_start = NOW() WHERE client_ip = '151.18.252.105';

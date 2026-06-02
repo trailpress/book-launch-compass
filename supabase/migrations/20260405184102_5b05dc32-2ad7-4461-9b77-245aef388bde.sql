@@ -1,0 +1,1 @@
+ALTER TABLE public.niche_analyses ADD COLUMN IF NOT EXISTS review_patterns JSONB DEFAULT NULL;
