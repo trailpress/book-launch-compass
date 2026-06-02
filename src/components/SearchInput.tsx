@@ -7,6 +7,13 @@ import { supabase } from "@/integrations/supabase/client";
 const RECENT_SEARCHES_KEY = "kdp_recent_search_terms_v1";
 const SEARCH_STATE_KEY = "kdp_search_state";
 const OFFLINE_SUGGESTIONS_COOLDOWN_MS = 60_000;
+const FALLBACK_SUGGESTIONS = [
+  "anxiety workbooks",
+  "low content journals",
+  "truck driver logbooks",
+  "self-care planners",
+  "budget trackers",
+];
 
 interface SearchInputProps {
   onSearch: (query: string) => void;
@@ -29,14 +36,6 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
   const suggestionsReservedSpace = hasOpenSuggestions
     ? Math.min(amazonSuggestions.length, 10) * 44 + 56
     : 0;
-
-  const fallbackSuggestions = [
-    "anxiety workbooks",
-    "low content journals",
-    "truck driver logbooks",
-    "self-care planners",
-    "budget trackers",
-  ];
 
   const loadHistorySuggestions = useCallback(() => {
     try {
@@ -140,7 +139,7 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
     if (normalizedQuery.length < 2) return [];
 
     const generated = buildGeneratedSuggestions(searchQuery);
-    const suggestionPool = Array.from(new Set([...loadHistorySuggestions(), ...generated, ...fallbackSuggestions]));
+    const suggestionPool = Array.from(new Set([...loadHistorySuggestions(), ...generated, ...FALLBACK_SUGGESTIONS]));
 
     const startsWithMatches = suggestionPool.filter((item) => item.toLowerCase().startsWith(normalizedQuery));
     const includesMatches = suggestionPool.filter(
@@ -247,7 +246,7 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
         clearTimeout(debounceRef.current);
       }
     };
-  }, [query, fetchSuggestions]);
+  }, [query, fetchSuggestions, buildLocalSuggestions]);
 
   // Close suggestions when clicking outside
   useEffect(() => {
@@ -290,6 +289,20 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
     requestAnimationFrame(() => {
       inputRef.current?.focus();
     });
+  };
+
+  const handleSuggestionPointerSelect = (
+    event: React.PointerEvent<HTMLButtonElement> | React.MouseEvent<HTMLButtonElement>,
+    suggestion: string,
+    runNow = false,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (runNow) {
+      handleSuggestionRunNow(suggestion);
+      return;
+    }
+    handleSuggestionClick(suggestion);
   };
 
   const handleSuggestionRunNow = (suggestion: string) => {
@@ -421,9 +434,8 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
                   >
                     <button
                       type="button"
-                      onPointerDown={(e) => e.preventDefault()}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => handleSuggestionClick(suggestion)}
+                      onPointerDown={(e) => handleSuggestionPointerSelect(e, suggestion)}
+                      onMouseDown={(e) => handleSuggestionPointerSelect(e, suggestion)}
                       className="flex-1 px-4 py-2.5 text-left flex items-center gap-3 min-w-0"
                       title="Inserisci nel campo di ricerca"
                     >
@@ -432,9 +444,8 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
                     </button>
                     <button
                       type="button"
-                      onPointerDown={(e) => e.preventDefault()}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => handleSuggestionRunNow(suggestion)}
+                      onPointerDown={(e) => handleSuggestionPointerSelect(e, suggestion, true)}
+                      onMouseDown={(e) => handleSuggestionPointerSelect(e, suggestion, true)}
                       className="px-3 py-2.5 text-xs font-medium text-muted-foreground hover:text-primary border-l border-border/50 flex-shrink-0"
                       title="Analizza subito"
                     >
@@ -450,7 +461,7 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
 
       <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
         <span className="text-sm text-muted-foreground">Try:</span>
-        {fallbackSuggestions.map((suggestion) => (
+        {FALLBACK_SUGGESTIONS.map((suggestion) => (
           <button
             key={suggestion}
             onClick={() => {

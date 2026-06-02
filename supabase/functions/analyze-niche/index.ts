@@ -821,8 +821,8 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
             let coverUrl = String(details.coverUrl || '');
             if (!coverUrl && markdown) {
               // Try to find image URL in markdown
-              const imgMatch = markdown.match(/https:\/\/m\.media-amazon\.com\/images\/[^\s\)\"]+/i) ||
-                               markdown.match(/https:\/\/images-na\.ssl-images-amazon\.com\/images\/[^\s\)\"]+/i);
+              const imgMatch = markdown.match(/https:\/\/m\.media-amazon\.com\/images\/[^\s)"]+/i) ||
+                               markdown.match(/https:\/\/images-na\.ssl-images-amazon\.com\/images\/[^\s)"]+/i);
               if (imgMatch?.[0]) {
                 coverUrl = imgMatch[0];
               }
@@ -1106,7 +1106,7 @@ async function scrapeRealSocialContent(niche: string): Promise<{
       comments = val.includes('k') ? parseFloat(val) * 1000 : parseInt(val);
     }
     
-    const subredditMatch = url.match(/reddit\.com\/r\/([^\/]+)/);
+    const subredditMatch = url.match(/reddit\.com\/r\/([^/]+)/);
     const subreddit = subredditMatch ? subredditMatch[1] : undefined;
     
     const authorMatch = markdown.match(/(?:by|u\/|Posted by)\s*([^\s\n]+)/i);
@@ -1128,7 +1128,7 @@ async function scrapeRealSocialContent(niche: string): Promise<{
     
     for (const para of paragraphs) {
       if (para.length < 50 || para.length > 500) continue;
-      if (para.match(/^[\[\(]|^\*\*|^#|^---|^___/)) continue;
+      if (para.match(/^[[(]|^\*\*|^#|^---|^___/)) continue;
       
       // CRITICAL: Check relevance to the niche before accepting
       if (!isContentRelevantToNiche(para, nicheKeyword, 0.2)) continue;
@@ -1506,7 +1506,7 @@ function extractYouTubeQuotesFromMarkdown(markdown: string, niche: string): stri
   
   for (const para of paragraphs) {
     if (para.length < 40 || para.length > 400) continue;
-    if (para.match(/^[\[\(#\*]|subscribe|like and share|follow me/i)) continue;
+    if (para.match(/^[[(*#]|subscribe|like and share|follow me/i)) continue;
     
     if (isContentRelevantToNiche(para, niche, 0.2)) {
       const clean = para.replace(/\[.*?\]\(.*?\)/g, '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
@@ -1772,7 +1772,7 @@ async function scrapeSearchVolume(niche: string): Promise<SearchVolumeData | nul
       `"${niche}" keyword volume site:ahrefs.com OR site:semrush.com OR site:ubersuggest.com OR site:keywordtool.io`,
     ];
 
-    let volumes: number[] = [];
+    const volumes: number[] = [];
     let bestSource = '';
 
     for (const query of queries) {
@@ -2475,6 +2475,7 @@ Return ONLY the JSON object.`;
       return `": "${escaped}"${end}`;
     });
     // Remove control characters
+    // eslint-disable-next-line no-control-regex
     jsonStr = jsonStr.replace(/[\x00-\x1F\x7F]/g, (char) => {
       if (char === '\n' || char === '\r' || char === '\t') return char;
       return '';
@@ -2964,7 +2965,7 @@ Deno.serve(async (req) => {
     console.log('Running in background mode - client will poll for results');
 
     // Start background analysis - this continues even after response is sent
-    // @ts-ignore - EdgeRuntime is available in Supabase Edge Functions
+    // @ts-expect-error - EdgeRuntime is available in Supabase Edge Functions
     EdgeRuntime.waitUntil(runAnalysisInBackground(niche));
 
     // Return immediately - client will poll database for results

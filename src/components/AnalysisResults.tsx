@@ -64,6 +64,7 @@ export function AnalysisResults({
   const [data, setData] = useState<AnalysisData | null>(initialData || null);
   const [error, setError] = useState<string | null>(null);
   const [loadingPhase, setLoadingPhase] = useState<string>("");
+  const [slowAnalysisNotice, setSlowAnalysisNotice] = useState(false);
   const [compareIds, setCompareIds] = useState<string[] | null>(null);
   const { toast } = useToast();
   const { playNotification, requestNotificationPermission } = useNotificationSound();
@@ -84,6 +85,7 @@ export function AnalysisResults({
   const runAnalysis = useCallback(async () => {
     setError(null);
     setData(null);
+    setSlowAnalysisNotice(false);
     onLoadingChange(true);
     setPollingStartTime(analysisStartedAt ?? Date.now());
     
@@ -113,10 +115,15 @@ export function AnalysisResults({
       }
     }, 8000);
 
+    const slowNoticeTimeout = setTimeout(() => {
+      setSlowAnalysisNotice(true);
+    }, 150_000);
+
     try {
       const result = await analyzeNiche(niche);
       
       clearInterval(phaseInterval);
+      clearTimeout(slowNoticeTimeout);
       
       if (!result.success || !result.data) {
         throw new Error(result.error || 'Analysis failed');
@@ -150,6 +157,7 @@ export function AnalysisResults({
       
     } catch (err) {
       clearInterval(phaseInterval);
+      clearTimeout(slowNoticeTimeout);
       const errorMessage = err instanceof Error ? err.message : 'Analysis failed';
       setError(errorMessage);
       toast({
@@ -160,6 +168,7 @@ export function AnalysisResults({
     } finally {
       onLoadingChange(false);
       setLoadingPhase("");
+      setSlowAnalysisNotice(false);
     }
   }, [analysisStartedAt, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
 
@@ -175,6 +184,7 @@ export function AnalysisResults({
   const resumeAnalysis = useCallback(async () => {
     setError(null);
     setData(null);
+    setSlowAnalysisNotice(false);
     onLoadingChange(true);
     setLoadingPhase("Ripresa analisi in corso...");
     setPollingStartTime(analysisStartedAt);
@@ -243,6 +253,16 @@ export function AnalysisResults({
             <p className="text-muted-foreground">
               Raccolta dati reali da Amazon, Reddit, Quora e forum...
             </p>
+            {loadingPhase && (
+              <p className="mt-3 text-sm text-primary">
+                {loadingPhase}
+              </p>
+            )}
+            {slowAnalysisNotice && (
+              <p className="mt-3 max-w-xl text-sm text-muted-foreground">
+                L'analisi sta richiedendo piu tempo del previsto. Continuo a controllare i risultati in background: puoi lasciare aperta questa schermata.
+              </p>
+            )}
           </div>
           
           <AnalysisProgressBar niche={niche} isLoading={isLoading} startedAt={analysisStartedAt} />

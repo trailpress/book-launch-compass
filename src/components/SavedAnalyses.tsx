@@ -244,7 +244,7 @@ export function SavedAnalyses({ onSelectAnalysis, onCompareNiches }: SavedAnalys
         setLoading(false);
       }
     }
-  }, [loadCachedAnalyses]);
+  }, [loadCachedAnalyses, normalizeAnalysis]);
 
   useEffect(() => {
     fetchAnalyses();

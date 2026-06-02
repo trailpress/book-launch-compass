@@ -417,12 +417,29 @@ async function invokeAnalysisData<T>(body: Record<string, unknown>): Promise<T> 
 // Store the start time for polling reference
 let pollingStartTime: Date | null = null;
 
+function calculateRiskScore({
+  profitabilityScore,
+  saturationScore,
+  opportunityScore,
+}: {
+  profitabilityScore: number;
+  saturationScore: number;
+  opportunityScore: number;
+}) {
+  const normalizedRisk =
+    saturationScore * 0.45 +
+    (100 - profitabilityScore) * 0.35 +
+    (100 - opportunityScore) * 0.2;
+
+  return Math.max(0, Math.min(100, Math.round(normalizedRisk)));
+}
+
 export function setPollingStartTime(startedAt?: number | null) {
   pollingStartTime = startedAt ? new Date(startedAt) : null;
 }
 
 // Poll for analysis completion by checking database
-export async function pollForAnalysis(niche: string, maxAttempts: number = 120): Promise<AnalysisResponse> {
+export async function pollForAnalysis(niche: string, maxAttempts: number = 180): Promise<AnalysisResponse> {
   const startTime = Date.now();
   
   // Use the stored start time or fall back to 10 minutes ago
@@ -505,7 +522,10 @@ export async function pollForAnalysis(niche: string, maxAttempts: number = 120):
     console.log(`Polling attempt ${attempt + 1}/${maxAttempts}...`);
   }
   
-  return { success: false, error: "Analysis timed out. Please try again." };
+  return {
+    success: false,
+    error: "Analysis timed out after about 15 minutes. The data source may still be slow or unavailable; please retry in a few minutes.",
+  };
 }
 
 export async function analyzeNiche(niche: string): Promise<AnalysisResponse> {
@@ -778,7 +798,14 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
         profitability: { score: analysisRow.profit_potential_score, trend: "stable" },
         saturation: { score: analysisRow.competition_score, trend: "stable" },
         opportunity: { score: analysisRow.demand_score, trend: mapTrend(analysisRow.trend_direction) },
-        risk: { score: 100 - analysisRow.overall_score, trend: "stable" },
+        risk: {
+          score: calculateRiskScore({
+            profitabilityScore: analysisRow.profit_potential_score,
+            saturationScore: analysisRow.competition_score,
+            opportunityScore: analysisRow.demand_score,
+          }),
+          trend: "stable",
+        },
       },
       verdict: {
         type: mapVerdictType(analysisRow.verdict_type),

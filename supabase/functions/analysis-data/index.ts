@@ -38,6 +38,23 @@ function mapVerdictType(type: string): "publish" | "publish-with-angle" | "avoid
   return "publish-with-angle";
 }
 
+function calculateRiskScore({
+  profitabilityScore,
+  saturationScore,
+  opportunityScore,
+}: {
+  profitabilityScore: number;
+  saturationScore: number;
+  opportunityScore: number;
+}) {
+  const normalizedRisk =
+    saturationScore * 0.45 +
+    (100 - profitabilityScore) * 0.35 +
+    (100 - opportunityScore) * 0.2;
+
+  return Math.max(0, Math.min(100, Math.round(normalizedRisk)));
+}
+
 function estimateDailySalesFromBSR(bsr: number): { min: number; max: number; avg: number } {
   if (!bsr || bsr <= 0) return { min: 0, max: 0, avg: 0 };
   if (bsr <= 100) return { min: 100, max: 250, avg: 150 };
@@ -277,53 +294,84 @@ serve(async (req) => {
       });
 
       const competitorsWithData = competitors.filter((comp) => comp.price > 0 && comp.bsr > 0);
-      const competitorsWithBsr = competitors.filter((comp) => comp.bsr > 0);
-      const priceSource = competitorsWithData.length > 0
-        ? competitorsWithData
-        : competitors.filter((comp) => comp.price > 0);
-      const avgPrice = priceSource.length > 0
+      const priceSource = competitors.filter((comp) => comp.price > 0);
+      const avgPriceFallback = priceSource.length > 0
         ? priceSource.reduce((sum, comp) => sum + comp.price, 0) / priceSource.length
         : 0;
-      const avgProfitPerCopy = competitorsWithData.length > 0
-        ? competitorsWithData.reduce((sum, comp) => sum + comp.profitPerCopy, 0) / competitorsWithData.length
-        : 0;
-      const salesSource = competitorsWithData.length > 0
-        ? competitorsWithData.map((comp) => estimateDailySalesFromBSR(comp.bsr))
-        : competitorsWithBsr.map((comp) => estimateDailySalesFromBSR(comp.bsr));
 
-      const conservativeDailySales = salesSource.length > 0
-        ? Math.min(...salesSource.map((sales) => sales.min))
-        : 0;
-      const expectedDailySales = salesSource.length > 0
-        ? salesSource.reduce((sum, sales) => sum + sales.avg, 0) / salesSource.length
-        : 0;
-      const optimisticDailySales = salesSource.length > 0
-        ? Math.max(...salesSource.map((sales) => sales.max))
-        : 0;
-
-      const profit = {
-        conservative: {
-          monthlySales: Math.round(conservativeDailySales * 30),
-          monthlyRevenue: Math.round(conservativeDailySales * 30 * avgPrice),
-          monthlyProfit: Math.round(conservativeDailySales * 30 * avgProfitPerCopy),
-        },
-        expected: {
-          monthlySales: Math.round(expectedDailySales * 30),
-          monthlyRevenue: Math.round(expectedDailySales * 30 * avgPrice),
-          monthlyProfit: Math.round(expectedDailySales * 30 * avgProfitPerCopy),
-        },
-        optimistic: {
-          monthlySales: Math.round(optimisticDailySales * 30),
-          monthlyRevenue: Math.round(optimisticDailySales * 30 * avgPrice),
-          monthlyProfit: Math.round(optimisticDailySales * 30 * avgProfitPerCopy),
-        },
-        avgPrice,
-        avgProfitPerCopy,
-        dailyRoyaltyRange: {
-          min: Math.round(conservativeDailySales * avgProfitPerCopy * 100) / 100,
-          max: Math.round(optimisticDailySales * avgProfitPerCopy * 100) / 100,
-        },
+      type PerBookProfit = {
+        monthlySales: number;
+        monthlyRevenue: number;
+        monthlyProfit: number;
+        price: number;
+        royaltyPerCopy: number;
       };
+
+      const perBook: PerBookProfit[] = competitorsWithData.map((comp) => {
+        const dailySales = estimateDailySalesFromBSR(comp.bsr).avg;
+        return {
+          monthlySales: Math.round(dailySales * 30),
+          monthlyRevenue: Math.round(dailySales * 30 * comp.price),
+          monthlyProfit: Math.round(dailySales * 30 * comp.profitPerCopy),
+          price: comp.price,
+          royaltyPerCopy: comp.profitPerCopy,
+        };
+      });
+
+      const avgPrice = perBook.length > 0
+        ? perBook.reduce((sum, book) => sum + book.price, 0) / perBook.length
+        : avgPriceFallback;
+      const avgProfitPerCopy = perBook.length > 0
+        ? perBook.reduce((sum, book) => sum + book.royaltyPerCopy, 0) / perBook.length
+        : 0;
+
+      const profit = perBook.length === 0
+        ? {
+            conservative: { monthlySales: 0, monthlyRevenue: 0, monthlyProfit: 0 },
+            expected: { monthlySales: 0, monthlyRevenue: 0, monthlyProfit: 0 },
+            optimistic: { monthlySales: 0, monthlyRevenue: 0, monthlyProfit: 0 },
+            avgPrice: Math.round(avgPrice * 100) / 100,
+            avgProfitPerCopy: Math.round(avgProfitPerCopy * 100) / 100,
+            dailyRoyaltyRange: { min: 0, max: 0 },
+          }
+        : (() => {
+            const sorted = [...perBook].sort((a, b) => a.monthlyProfit - b.monthlyProfit);
+            const worst = sorted[0];
+            const best = sorted[sorted.length - 1];
+            const expected = sorted.length % 2 === 1
+              ? sorted[(sorted.length - 1) / 2]
+              : {
+                  monthlySales: Math.round((sorted[sorted.length / 2 - 1].monthlySales + sorted[sorted.length / 2].monthlySales) / 2),
+                  monthlyRevenue: Math.round((sorted[sorted.length / 2 - 1].monthlyRevenue + sorted[sorted.length / 2].monthlyRevenue) / 2),
+                  monthlyProfit: Math.round((sorted[sorted.length / 2 - 1].monthlyProfit + sorted[sorted.length / 2].monthlyProfit) / 2),
+                  price: (sorted[sorted.length / 2 - 1].price + sorted[sorted.length / 2].price) / 2,
+                  royaltyPerCopy: (sorted[sorted.length / 2 - 1].royaltyPerCopy + sorted[sorted.length / 2].royaltyPerCopy) / 2,
+                };
+
+            return {
+              conservative: {
+                monthlySales: worst.monthlySales,
+                monthlyRevenue: worst.monthlyRevenue,
+                monthlyProfit: worst.monthlyProfit,
+              },
+              expected: {
+                monthlySales: expected.monthlySales,
+                monthlyRevenue: expected.monthlyRevenue,
+                monthlyProfit: expected.monthlyProfit,
+              },
+              optimistic: {
+                monthlySales: best.monthlySales,
+                monthlyRevenue: best.monthlyRevenue,
+                monthlyProfit: best.monthlyProfit,
+              },
+              avgPrice: Math.round(avgPrice * 100) / 100,
+              avgProfitPerCopy: Math.round(avgProfitPerCopy * 100) / 100,
+              dailyRoyaltyRange: {
+                min: Math.round((worst.monthlyProfit / 30) * 100) / 100,
+                max: Math.round((best.monthlyProfit / 30) * 100) / 100,
+              },
+            };
+          })();
 
       const responseData = {
         scores: {
@@ -333,7 +381,14 @@ serve(async (req) => {
             score: analysisRow.demand_score,
             trend: mapTrend(analysisRow.trend_direction),
           },
-          risk: { score: 100 - analysisRow.overall_score, trend: "stable" },
+          risk: {
+            score: calculateRiskScore({
+              profitabilityScore: analysisRow.profit_potential_score,
+              saturationScore: analysisRow.competition_score,
+              opportunityScore: analysisRow.demand_score,
+            }),
+            trend: "stable",
+          },
         },
         verdict: {
           type: mapVerdictType(analysisRow.verdict_type),

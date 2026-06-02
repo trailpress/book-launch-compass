@@ -14,11 +14,13 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-*
 dist-check
 dist-stale
 dist-check-stale
 dist-ssr
 *.local
+robots-stale.txt
 
 # Editor directories and files
 .vscode/*
