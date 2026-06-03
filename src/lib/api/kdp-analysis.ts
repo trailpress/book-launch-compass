@@ -507,7 +507,12 @@ export async function pollForAnalysis(niche: string, maxAttempts: number = 180):
 
       if (job?.status === "running") {
         const lastUpdate = new Date(job.updated_at || job.started_at).getTime();
-        const elapsed = Date.now() - startTime;
+        const jobStartedAt = new Date(job.started_at).getTime();
+        const elapsed = Math.max(
+          Date.now() - startTime,
+          Date.now() - referenceTime.getTime(),
+          Number.isFinite(jobStartedAt) ? Date.now() - jobStartedAt : 0,
+        );
         const isStale = Number.isFinite(lastUpdate) && Date.now() - lastUpdate > staleJobAfterMs;
 
         if (isStale && elapsed > staleJobMinimumElapsedMs) {
