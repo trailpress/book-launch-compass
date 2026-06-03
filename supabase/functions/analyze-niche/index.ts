@@ -3100,6 +3100,13 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null) {
     const allExcerpts = [...amazonExcerpts, ...socialExcerpts, ...youtubeExcerpts];
     console.log('Total excerpts:', allExcerpts.length);
 
+    const booksWithRealBsr = realBooks.filter((book) => book.bsr && book.bsr > 0);
+    if (realBooks.length === 0 || booksWithRealBsr.length === 0) {
+      throw new Error(
+        `No usable Amazon competitor/BSR data found for "${niche}". The analysis was stopped because results without real BSR would be misleading.`,
+      );
+    }
+
     // Step 5: Analyze REAL data with AI including clustering
     console.log('Step 5: Analyzing REAL data with AI...');
     await updateAnalysisJob(jobId, { status: 'running', error_message: 'ai_analysis' });

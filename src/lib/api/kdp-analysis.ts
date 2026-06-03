@@ -250,9 +250,9 @@ export interface SavedAnalysisCacheEntry {
   created_at: string;
 }
 
-const STORAGE_KEY = "kdp_last_analysis_id";
-export const SAVED_ANALYSES_MIRROR_KEY = "kdp_saved_analyses_mirror_v1";
-const ANALYSIS_DATA_CACHE_KEY = "kdp_analysis_data_cache_v1";
+const STORAGE_KEY = "kdp_last_analysis_id_v2";
+export const SAVED_ANALYSES_MIRROR_KEY = "kdp_saved_analyses_mirror_v2";
+const ANALYSIS_DATA_CACHE_KEY = "kdp_analysis_data_cache_v2";
 
 interface CachedAnalysisRecord {
   data: AnalysisData;

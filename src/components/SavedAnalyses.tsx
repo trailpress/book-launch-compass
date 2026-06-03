@@ -24,7 +24,7 @@ import {
   SAVED_ANALYSES_MIRROR_KEY,
 } from "@/lib/api/kdp-analysis";
 
-const SAVED_ANALYSES_CACHE_KEY = "kdp_saved_analyses_cache_v1";
+const SAVED_ANALYSES_CACHE_KEY = "kdp_saved_analyses_cache_v2";
 
 interface SavedAnalysis {
   id: string;

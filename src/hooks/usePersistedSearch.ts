@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 
-const SEARCH_STATE_KEY = "kdp_search_state";
+const SEARCH_STATE_KEY = "kdp_search_state_v2";
 const STATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ANALYSIS_RESUME_TTL_MS = 20 * 60 * 1000; // avoid reviving stale in-progress runs
 

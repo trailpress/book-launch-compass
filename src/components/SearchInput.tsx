@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 
 const RECENT_SEARCHES_KEY = "kdp_recent_search_terms_v1";
-const SEARCH_STATE_KEY = "kdp_search_state";
+const SEARCH_STATE_KEY = "kdp_search_state_v2";
 const OFFLINE_SUGGESTIONS_COOLDOWN_MS = 60_000;
 const FALLBACK_SUGGESTIONS = [
   "anxiety workbooks",
