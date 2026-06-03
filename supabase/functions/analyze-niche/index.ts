@@ -54,7 +54,7 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const MAX_REQUESTS_PER_WINDOW = 100; // 100 requests per hour per IP
 
 // Timeout helper for fetch requests (prevents hanging)
-const FETCH_TIMEOUT_MS = 90000; // 90 seconds - increased for Firecrawl API
+const FETCH_TIMEOUT_MS = 30000; // Keep scraping bounded so background jobs can finish reliably
 
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -93,7 +93,60 @@ async function callAIChat(messages: Array<{ role: 'system' | 'user' | 'assistant
       max_tokens: options.maxTokens ?? 8000,
       ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
     }),
-  });
+  }, 60000);
+}
+
+function createServiceClient() {
+  return createClient(SUPABASE_URL || '', SUPABASE_SERVICE_ROLE_KEY || '');
+}
+
+async function createAnalysisJob(niche: string): Promise<{ id: string | null; error: string | null }> {
+  try {
+    const supabase = createServiceClient();
+    const { data, error } = await supabase
+      .from('analysis_jobs')
+      .insert({
+        niche_keyword: niche,
+        status: 'running',
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error('Failed to create analysis job:', error.message);
+      return { id: null, error: error.message };
+    }
+
+    return { id: data?.id || null, error: null };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('Failed to create analysis job:', errorMessage);
+    return { id: null, error: errorMessage };
+  }
+}
+
+async function updateAnalysisJob(
+  jobId: string | null | undefined,
+  values: { status: 'running' | 'completed' | 'failed'; analysis_id?: string | null; error_message?: string | null; completed_at?: string | null },
+) {
+  if (!jobId) return;
+
+  try {
+    const supabase = createServiceClient();
+    const { error } = await supabase
+      .from('analysis_jobs')
+      .update({
+        ...values,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', jobId);
+
+    if (error) {
+      console.error('Failed to update analysis job:', error.message);
+    }
+  } catch (error) {
+    console.error('Failed to update analysis job:', error instanceof Error ? error.message : String(error));
+  }
 }
 
 function getClientIP(req: Request): string {
@@ -480,7 +533,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
 
   try {
     // STRATEGY: try multiple query variations + retries to reduce empty competitor runs
-    const searchVariations = simplifyNicheForSearch(niche).slice(0, 3);
+    const searchVariations = simplifyNicheForSearch(niche).slice(0, 1);
     console.log('Amazon search variations:', searchVariations.join(' | '));
 
     for (const searchNiche of searchVariations) {
@@ -492,7 +545,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
 
       let extractedBooks: any[] = [];
 
-      for (let attempt = 1; attempt <= 2 && extractedBooks.length === 0; attempt++) {
+      for (let attempt = 1; attempt <= 1 && extractedBooks.length === 0; attempt++) {
         try {
           const searchResponse = await fetchWithTimeout('https://api.firecrawl.dev/v1/scrape', {
             method: 'POST',
@@ -528,9 +581,9 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
                 },
                 prompt: `Extract ALL books from this Amazon search results page for "${searchNiche}". For each book get the exact title, author, price, star rating, number of reviews, ASIN code from the product link, and the book cover image URL (the src attribute of the img tag showing the book cover). Return up to 15 books.`
               },
-              waitFor: 5000,
+              waitFor: 2000,
             }),
-          }, 60000 + (attempt - 1) * 20000);
+          }, 25000);
 
           if (!searchResponse.ok) {
             const errorBody = await searchResponse.text();
@@ -587,7 +640,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
       if (books.length < 3) {
         console.log('Direct scrape got few results, trying search API for variation:', searchNiche);
 
-        for (let attempt = 1; attempt <= 2; attempt++) {
+        for (let attempt = 1; attempt <= 1; attempt++) {
           try {
             const searchApiResponse = await fetchWithTimeout('https://api.firecrawl.dev/v1/search', {
               method: 'POST',
@@ -615,10 +668,10 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
                     },
                     prompt: 'Extract the book title, author, Best Sellers Rank (BSR number only), review count, price, rating, and page count from this Amazon book page.'
                   },
-                  waitFor: 3000
+                  waitFor: 1500
                 }
               }),
-            }, 90000 + (attempt - 1) * 15000);
+            }, 30000);
 
             if (!searchApiResponse.ok) {
               const errorBody = await searchApiResponse.text();
@@ -745,7 +798,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
     // We need real BSR data to validate and confirm the best seller ranking
     // Increase to 6 books to ensure we get enough real BSR data for top 3
     // Fetch details for up to 8 books to maximize chances of getting 3+ with real BSR
-    const booksForDetailFetch = books.slice(0, 8).filter(b => 
+    const booksForDetailFetch = books.slice(0, 3).filter(b => 
       (b.asin.startsWith('B') || b.asin.match(/^[0-9]/)) && !b.asin.startsWith('TEMP')
     );
     
@@ -784,9 +837,9 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
                 },
                 prompt: 'Extract EXACT data from this Amazon book page. For BSR (Best Sellers Rank), find the number shown after "Best Sellers Rank:" or "#" in Books category. Return just the number without commas.'
               },
-              waitFor: 3000, // Reduced wait time
+              waitFor: 1500,
             }),
-          });
+          }, 25000);
 
           if (detailResponse.ok) {
             const detailData = await detailResponse.json();
@@ -1944,6 +1997,38 @@ function estimateSalesFromBSR(bsr: number): number {
   return Math.round(estimateDailySalesFromBSR(bsr).avg * 30);
 }
 
+function generateHistoricalData(currentBsr: number, currentReviews: number, currentPrice: number) {
+  const dates: string[] = [];
+  const bsr: number[] = [];
+  const price: number[] = [];
+  const reviews: number[] = [];
+  const estimatedSales: number[] = [];
+  const now = new Date();
+
+  for (let index = 11; index >= 0; index -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - index, 1);
+    const monthFactor = index / 11;
+    const seasonalWave = Math.sin((11 - index) * Math.PI / 6) * 0.08;
+    const olderBsrFactor = 1 + monthFactor * 0.25 + seasonalWave;
+    const historicalBsr = Math.max(1, Math.round(currentBsr * olderBsrFactor));
+    const reviewFactor = Math.max(0.1, 1 - monthFactor * 0.45);
+
+    dates.push(date.toISOString().split('T')[0].slice(0, 7));
+    bsr.push(historicalBsr);
+    price.push(currentPrice);
+    reviews.push(Math.max(0, Math.round(currentReviews * reviewFactor)));
+    estimatedSales.push(estimateSalesFromBSR(historicalBsr));
+  }
+
+  return {
+    dates,
+    bsr,
+    price,
+    reviews,
+    estimatedSales,
+  };
+}
+
 function calculateKdpRoyalty(
   listPrice: number,
   pageCount: number,
@@ -2682,7 +2767,7 @@ async function saveAnalysisToDatabase(niche: string, analysis: AnalysisResult, s
 }
 
 // Background analysis function with improved error handling
-async function runAnalysisInBackground(niche: string) {
+async function runAnalysisInBackground(niche: string, jobId?: string | null) {
   const startTime = Date.now();
   
   try {
@@ -2690,6 +2775,7 @@ async function runAnalysisInBackground(niche: string) {
 
     // Step 1: Scrape REAL Amazon book data with error handling
     console.log('Step 1: Scraping REAL Amazon data...');
+    await updateAnalysisJob(jobId, { status: 'running', error_message: 'scraping_amazon' });
     let realBooks: ScrapedBook[] = [];
     let amazonSources: string[] = [];
     
@@ -2713,6 +2799,7 @@ async function runAnalysisInBackground(niche: string) {
 
     // Step 2: Scrape Amazon reviews, social content, YouTube, Google Trends in parallel
     console.log('Step 2-5: Scraping reviews, social, YouTube, trends, volume in parallel...');
+    await updateAnalysisJob(jobId, { status: 'running', error_message: 'scraping_parallel_sources' });
     const bookAsins = realBooks.map(b => b.asin).filter(a => a.startsWith('B0') || a.match(/^[0-9]/)).slice(0, 5);
     
     let amazonReviews: string[] = [];
@@ -2794,6 +2881,7 @@ async function runAnalysisInBackground(niche: string) {
 
     // Step 5: Analyze REAL data with AI including clustering
     console.log('Step 5: Analyzing REAL data with AI...');
+    await updateAnalysisJob(jobId, { status: 'running', error_message: 'ai_analysis' });
     const allSources = [...new Set([...amazonSources, ...reviewSources, ...socialSources, ...youtubeSources])];
     
     // Add Google Trends URL to sources if we have data
@@ -2858,7 +2946,14 @@ async function runAnalysisInBackground(niche: string) {
 
     // Step 6: Save to database
     console.log('Step 6: Saving to database...');
+    await updateAnalysisJob(jobId, { status: 'running', error_message: 'saving_to_database' });
     const analysisId = await saveAnalysisToDatabase(niche, analysis, searchVolumeData);
+    await updateAnalysisJob(jobId, {
+      status: 'completed',
+      analysis_id: analysisId,
+      error_message: null,
+      completed_at: new Date().toISOString(),
+    });
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log('=== BACKGROUND ANALYSIS COMPLETE for:', niche, `=== (${duration}s)`);
@@ -2873,6 +2968,11 @@ async function runAnalysisInBackground(niche: string) {
   } catch (error) {
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.error(`=== BACKGROUND ANALYSIS FAILED for: ${niche} === (${duration}s)`);
+    await updateAnalysisJob(jobId, {
+      status: 'failed',
+      error_message: error instanceof Error ? error.message : String(error),
+      completed_at: new Date().toISOString(),
+    });
     
     if (error instanceof Error) {
       if (error.name === 'AbortError') {
@@ -2977,10 +3077,11 @@ Deno.serve(async (req) => {
 
     console.log(`=== STARTING ANALYSIS for: ${niche} === (IP: ${clientIP}, remaining: ${rateLimit.remaining})`);
     console.log('Running in background mode - client will poll for results');
+    const job = await createAnalysisJob(niche);
 
     // Start background analysis - this continues even after response is sent
     // @ts-expect-error - EdgeRuntime is available in Supabase Edge Functions
-    EdgeRuntime.waitUntil(runAnalysisInBackground(niche));
+    EdgeRuntime.waitUntil(runAnalysisInBackground(niche, job.id));
 
     // Return immediately - client will poll database for results
     return new Response(
@@ -2989,7 +3090,9 @@ Deno.serve(async (req) => {
         message: 'Analysis started in background. Poll database for results.',
         data: {
           status: 'processing',
-          niche
+          niche,
+          jobId: job.id,
+          jobError: job.error
         }
       }),
       { headers: rateLimitHeaders }

@@ -152,6 +152,55 @@ async function checkFirecrawl(apiKey: string) {
   }
 }
 
+async function checkOpenAI(apiKey: string, model: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: "Return a tiny JSON health response." },
+          { role: "user", content: "Return {\"ok\":true}." },
+        ],
+        response_format: { type: "json_object" },
+        max_tokens: 20,
+      }),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      message: typeof parsed?.error === "object" && parsed.error !== null
+        ? String((parsed.error as Record<string, unknown>).message || "OpenAI check failed")
+        : null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      message: error instanceof Error ? error.message : "OpenAI check failed",
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
 
@@ -183,8 +232,12 @@ serve(async (req) => {
         .select("id", { count: "exact", head: true });
 
       const shouldCheckFirecrawl = body?.checkFirecrawl === true;
+      const shouldCheckOpenAI = body?.checkOpenAI === true;
       const firecrawl = shouldCheckFirecrawl && FIRECRAWL_API_KEY
         ? await checkFirecrawl(FIRECRAWL_API_KEY)
+        : null;
+      const openai = shouldCheckOpenAI && OPENAI_API_KEY
+        ? await checkOpenAI(OPENAI_API_KEY, OPENAI_MODEL)
         : null;
 
       return new Response(
@@ -205,6 +258,9 @@ serve(async (req) => {
               supabaseUrl: SUPABASE_URL ? "present" : "missing",
               supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY ? "present" : "missing",
             },
+            openai: shouldCheckOpenAI
+              ? openai ?? { ok: false, status: null, message: "OPENAI_API_KEY missing" }
+              : { ok: null, status: null, message: "Skipped. Send checkOpenAI: true to test the API key." },
             firecrawl: shouldCheckFirecrawl
               ? firecrawl ?? { ok: false, status: null, message: "FIRECRAWL_API_KEY missing" }
               : { ok: null, status: null, message: "Skipped. Send checkFirecrawl: true to test the API key." },
@@ -212,6 +268,32 @@ serve(async (req) => {
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
+    }
+
+    if (action === "latestJobByNiche") {
+      const niche = String(body?.niche || "").trim();
+      if (!niche) {
+        return new Response(JSON.stringify({ success: false, error: "Niche is required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const since = String(body?.since || new Date(Date.now() - 30 * 60 * 1000).toISOString());
+      const { data: job, error: jobError } = await supabase
+        .from("analysis_jobs")
+        .select("id, niche_keyword, status, analysis_id, error_message, started_at, completed_at, updated_at")
+        .eq("niche_keyword", niche)
+        .gte("started_at", since)
+        .order("started_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (jobError) throw jobError;
+
+      return new Response(JSON.stringify({ success: true, data: job || null }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     if (action === "listRecent") {
