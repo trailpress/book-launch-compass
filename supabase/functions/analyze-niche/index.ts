@@ -43,7 +43,8 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
 };
 
-const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini';
 const FIRECRAWL_API_KEY = Deno.env.get('FIRECRAWL_API_KEY');
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -68,6 +69,31 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function callAIChat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, options: {
+  responseFormat?: { type: 'json_object' };
+  temperature?: number;
+  maxTokens?: number;
+} = {}) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY not configured');
+  }
+
+  return await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 8000,
+      ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
+    }),
+  });
 }
 
 function getClientIP(req: Request): string {
@@ -1829,26 +1855,20 @@ async function scrapeSearchVolume(niche: string): Promise<SearchVolumeData | nul
       console.log('No direct volume data found, using AI estimation with Google Trends correlation...');
       
       try {
-        const aiResponse = await fetchWithTimeout('https://ai.gateway.lovable.dev/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-            'Content-Type': 'application/json',
+        const aiResponse = await callAIChat([
+          {
+            role: 'system',
+            content: 'You are a keyword research expert. Given a keyword, estimate its monthly search volume on Google (US market). Use your training data knowledge of real keyword volumes from SEO tools. Return ONLY a JSON object with: {"volume": number, "confidence": "high"|"medium"|"low", "reasoning": "brief explanation"}. Be conservative - do NOT inflate numbers.'
           },
-          body: JSON.stringify({
-            model: 'google/gemini-2.5-flash',
-            messages: [
-              { 
-                role: 'system', 
-                content: 'You are a keyword research expert. Given a keyword, estimate its monthly search volume on Google (US market). Use your training data knowledge of real keyword volumes from SEO tools. Return ONLY a JSON object with: {"volume": number, "confidence": "high"|"medium"|"low", "reasoning": "brief explanation"}. Be conservative - do NOT inflate numbers.' 
-              },
-              { 
-                role: 'user', 
-                content: `Estimate the monthly Google search volume (US market) for: "${niche}". Consider related keyword variations. Return ONLY JSON.` 
-              }
-            ],
-          }),
-        }, 20000);
+          {
+            role: 'user',
+            content: `Estimate the monthly Google search volume (US market) for: "${niche}". Consider related keyword variations. Return ONLY JSON.`
+          }
+        ], {
+          responseFormat: { type: 'json_object' },
+          temperature: 0.2,
+          maxTokens: 600,
+        });
 
         if (aiResponse.ok) {
           const aiData = await aiResponse.json();
@@ -2491,19 +2511,13 @@ Return ONLY the JSON object.`;
     try {
       console.log(`AI analysis attempt ${attempt}/${MAX_RETRIES}`);
       
-      const response = await fetchWithTimeout('https://ai.gateway.lovable.dev/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-        }),
+      const response = await callAIChat([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ], {
+        responseFormat: { type: 'json_object' },
+        temperature: 0.4,
+        maxTokens: 8000,
       });
 
       if (!response.ok) {

@@ -162,7 +162,8 @@ serve(async (req) => {
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -198,7 +199,8 @@ serve(async (req) => {
               error: dbError?.message || null,
             },
             secrets: {
-              lovableApiKey: LOVABLE_API_KEY ? "present" : "missing",
+              openaiApiKey: OPENAI_API_KEY ? "present" : "missing",
+              openaiModel: OPENAI_MODEL,
               firecrawlApiKey: FIRECRAWL_API_KEY ? "present" : "missing",
               supabaseUrl: SUPABASE_URL ? "present" : "missing",
               supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY ? "present" : "missing",
