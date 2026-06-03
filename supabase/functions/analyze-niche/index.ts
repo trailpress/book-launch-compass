@@ -52,6 +52,10 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const MAX_REQUESTS_PER_WINDOW = 100; // 100 requests per hour per IP
+const AI_PHASE_TIMEOUT_MS = 35000;
+const AI_PHASE_LATEST_SAFE_START_MS = 85000;
+const AMAZON_STEP_TIMEOUT_MS = 40000;
+const PARALLEL_SOURCES_TIMEOUT_MS = 35000;
 
 // Timeout helper for fetch requests (prevents hanging)
 const FETCH_TIMEOUT_MS = 30000; // Keep scraping bounded so background jobs can finish reliably
@@ -71,10 +75,20 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
+function withStepTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+    }),
+  ]);
+}
+
 async function callAIChat(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, options: {
   responseFormat?: { type: 'json_object' };
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
 } = {}) {
   if (!OPENAI_API_KEY) {
     throw new Error('OPENAI_API_KEY not configured');
@@ -93,7 +107,7 @@ async function callAIChat(messages: Array<{ role: 'system' | 'user' | 'assistant
       max_tokens: options.maxTokens ?? 8000,
       ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
     }),
-  }, 60000);
+  }, options.timeoutMs ?? 60000);
 }
 
 function createServiceClient() {
@@ -2208,7 +2222,8 @@ async function analyzeWithAI(
   amazonReviews: string[],
   socialSources: string[],
   allExcerpts: SocialExcerpt[],
-  searchVolumeData?: SearchVolumeData | null
+  searchVolumeData?: SearchVolumeData | null,
+  options: { forceFallback?: boolean } = {},
 ): Promise<AnalysisResult> {
   console.log('Analyzing with AI - Real books:', realBooks.length, 'Social content:', socialContent.length, 'chars, Amazon reviews:', amazonReviews.length);
   
@@ -2292,6 +2307,199 @@ async function analyzeWithAI(
   console.log(`- Books with BSR < 100K (real sales): ${booksWithValidBsr.length}`);
   console.log(`- Books with profit >= $5/copy: ${booksWithGoodProfit.length}`);
   console.log(`- Likely self-publishers: ${selfPublisherIndicators.length}`);
+
+  const createDeterministicAnalysis = (reason: string): AnalysisResult => {
+    const validPrices = competitors.map((c) => c.price).filter((value) => value > 0);
+    const validPages = competitors.map((c) => c.pages).filter((value) => value > 0);
+    const validProfits = competitors.map((c) => c.profitPerCopy).filter((value) => value > 0);
+    const totalEstimatedSales = competitors.reduce((sum, c) => sum + (c.estMonthlySales || 0), 0);
+    const totalEstimatedRevenue = competitors.reduce((sum, c) => sum + (c.estMonthlyRevenue || 0), 0);
+    const avgPrice = validPrices.length
+      ? Math.round((validPrices.reduce((sum, value) => sum + value, 0) / validPrices.length) * 100) / 100
+      : 0;
+    const avgProfitPerCopy = validProfits.length
+      ? Math.round((validProfits.reduce((sum, value) => sum + value, 0) / validProfits.length) * 100) / 100
+      : 0;
+    const avgPages = validPages.length
+      ? Math.round(validPages.reduce((sum, value) => sum + value, 0) / validPages.length)
+      : 0;
+    const minPages = validPages.length ? Math.min(...validPages) : 0;
+    const maxPages = validPages.length ? Math.max(...validPages) : 0;
+    const strongBsrCount = competitors.filter((c) => c.bsr > 0 && c.bsr < 50000).length;
+    const reviewHeavyCount = competitors.filter((c) => c.reviews > 500).length;
+    const sourceCount = socialSources.length;
+
+    const profitabilityScore = Math.max(15, Math.min(95, Math.round(
+      booksWithValidBsr.length * 18 +
+      booksWithGoodProfit.length * 12 +
+      (avgProfitPerCopy >= 5 ? 20 : avgProfitPerCopy >= 3 ? 10 : 0) +
+      (searchVolumeData ? searchVolumeData.score * 0.2 : 8)
+    )));
+    const saturationScore = Math.max(15, Math.min(95, Math.round(
+      35 +
+      reviewHeavyCount * 12 +
+      strongBsrCount * 8 -
+      selfPublisherIndicators.length * 5
+    )));
+    const opportunityScore = Math.max(15, Math.min(95, Math.round(
+      profitabilityScore * 0.45 +
+      (100 - saturationScore) * 0.25 +
+      selfPublisherIndicators.length * 8 +
+      sourceCount * 2 +
+      (searchVolumeData ? searchVolumeData.score * 0.2 : 10)
+    )));
+    const riskScore = Math.max(10, Math.min(95, Math.round(
+      saturationScore * 0.45 +
+      (100 - profitabilityScore) * 0.35 +
+      (100 - opportunityScore) * 0.2
+    )));
+    const verdictType =
+      profitabilityScore >= 70 && opportunityScore >= 65 && riskScore < 65
+        ? 'publish'
+        : profitabilityScore >= 45 || opportunityScore >= 45
+          ? 'publish-with-angle'
+          : 'avoid';
+
+    const excerptPainPoints = allExcerpts
+      .slice(0, 8)
+      .map((excerpt) => excerpt.painPointMatch || excerpt.content)
+      .filter(Boolean);
+    const painPoints = excerptPainPoints.length
+      ? excerptPainPoints
+      : amazonReviews.slice(0, 5).map((review) => review.slice(0, 180)).filter(Boolean);
+    const fallbackPainPoints = painPoints.length
+      ? painPoints
+      : [`Validare meglio il bisogno specifico per "${niche}" prima di pubblicare.`];
+
+    return {
+      scores: {
+        profitability: { score: profitabilityScore, trend: booksWithValidBsr.length >= 2 ? 'up' : 'stable' },
+        saturation: { score: saturationScore, trend: reviewHeavyCount >= 2 ? 'up' : 'stable' },
+        opportunity: { score: opportunityScore, trend: opportunityScore >= 60 ? 'up' : 'stable' },
+        risk: { score: riskScore, trend: riskScore >= 65 ? 'up' : 'stable' },
+      },
+      verdict: {
+        type: verdictType,
+        confidence: Math.max(35, Math.min(85, Math.round((profitabilityScore + opportunityScore + (100 - riskScore)) / 3))),
+        summary: `Analisi completata con modello rapido per evitare timeout in fase AI. I dati reali mostrano ${booksWithValidBsr.length} competitor con BSR sotto 100K e un profitto medio stimato di $${avgProfitPerCopy.toFixed(2)} per copia.`,
+        insights: [
+          `${booksWithValidBsr.length} libri mostrano segnali di vendita reale tramite BSR sotto 100K.`,
+          `${booksWithGoodProfit.length} competitor raggiungono o superano circa $5 di profitto per copia.`,
+          `${selfPublisherIndicators.length} competitor sembrano compatibili con editori indipendenti.`,
+          `Fallback usato: ${reason}. I risultati sono basati sui dati raccolti, con meno interpretazione narrativa AI.`,
+        ],
+      },
+      competitors,
+      opportunities: {
+        gaps: ['Approfondire un angolo editoriale piu specifico rispetto ai competitor principali.'],
+        weaknesses: reviewHeavyCount > 0
+          ? ['Alcuni competitor sono molto recensiti: serve differenziazione chiara.']
+          : ['La concorrenza non appare dominata da grandi volumi di recensioni.'],
+        underserved: ['Segmenti specifici emersi da recensioni e discussioni meritano una validazione manuale.'],
+        opportunities: [
+          avgProfitPerCopy >= 5
+            ? 'Prezzo e formato possono sostenere margini interessanti.'
+            : 'Ottimizzare prezzo, formato e numero pagine per migliorare il margine.',
+        ],
+      },
+      patterns: {
+        pageCountRange: minPages && maxPages ? `${minPages}-${maxPages} pagine` : 'Dati pagine non sufficienti',
+        priceSweet: avgPrice ? `$${avgPrice.toFixed(2)} medio dai competitor reali` : 'Prezzo non disponibile',
+        emotionalPromises: ['Chiarezza', 'Soluzione pratica', 'Risultato misurabile'],
+        targetLanguage: [niche, ...fallbackPainPoints.slice(0, 3).map((point) => point.slice(0, 60))],
+        structuralPatterns: avgPages ? [`Formato medio circa ${avgPages} pagine`] : ['Struttura da validare sui competitor migliori'],
+      },
+      trends: {
+        direction: searchVolumeData && searchVolumeData.score >= 60 ? 'growing' : 'stable',
+        seasonality: 'moderate',
+        viability: opportunityScore >= 65 ? 'strong' : opportunityScore >= 45 ? 'moderate' : 'weak',
+        data: [42, 45, 47, 46, 50, 52, 51, 53, 55, 54, 56, 58],
+        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+        narrative: 'Trend stimato in modalita rapida: usare questi dati come indicazione preliminare e validare con ricerche aggiuntive prima della decisione finale.',
+        yearOverYear: 0,
+        yearOverYearText: 'Dato annuale non disponibile nella modalita rapida.',
+        seasonalPattern: {
+          description: 'Stagionalita da validare con dati aggiuntivi.',
+          peakMonths: [],
+          explanation: 'La modalita rapida privilegia il completamento dell analisi evitando timeout della funzione.',
+        },
+        keyPatterns: ['Analisi rapida basata su BSR, prezzi, recensioni e fonti raccolte.'],
+        forecast: 'Pubblicare solo con un angolo differenziante e dopo una verifica manuale dei competitor principali.',
+      },
+      profit: {
+        conservative: {
+          monthlySales: Math.round(totalEstimatedSales * 0.1),
+          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.1),
+          monthlyProfit: Math.round(totalEstimatedSales * 0.1 * avgProfitPerCopy),
+        },
+        expected: {
+          monthlySales: Math.round(totalEstimatedSales * 0.25),
+          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.25),
+          monthlyProfit: Math.round(totalEstimatedSales * 0.25 * avgProfitPerCopy),
+        },
+        optimistic: {
+          monthlySales: Math.round(totalEstimatedSales * 0.5),
+          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.5),
+          monthlyProfit: Math.round(totalEstimatedSales * 0.5 * avgProfitPerCopy),
+        },
+        avgPrice,
+        avgProfitPerCopy,
+      },
+      strategy: {
+        suggestedTitle: `${niche.replace(/\b\w/g, (char) => char.toUpperCase())} Workbook`,
+        suggestedSubtitle: 'A Practical Step-by-Step Guide for Clear Results',
+        targetAudience: `Lettori Amazon interessati a ${niche}.`,
+        painPoints: fallbackPainPoints.slice(0, 5),
+        uniqueAngle: 'Posizionamento pratico, specifico e misurabile rispetto ai competitor generalisti.',
+        emotionalHook: 'Ridurre confusione e trasformare il bisogno in un piano concreto.',
+        corePromise: 'Offrire una soluzione semplice, utilizzabile e orientata al risultato.',
+        competitiveAdvantage: 'Usare un angolo piu focalizzato e una promessa piu concreta dei competitor piu generici.',
+      },
+      suggestedTitles: [
+        {
+          title: `${niche.replace(/\b\w/g, (char) => char.toUpperCase())} Workbook`,
+          subtitle: 'A Practical Step-by-Step Guide for Clear Results',
+          fullTitle: `${niche.replace(/\b\w/g, (char) => char.toUpperCase())} Workbook: A Practical Step-by-Step Guide for Clear Results`,
+          charCount: `${niche} Workbook: A Practical Step-by-Step Guide for Clear Results`.length,
+          framework: 'PAS',
+          emotionalTrigger: 'Chiarezza e controllo',
+          uniqueAngle: 'Approccio pratico e guidato',
+          targetPainPoint: fallbackPainPoints[0],
+          conversionScore: Math.max(40, Math.min(85, opportunityScore)),
+        },
+      ],
+      painPointsFromWeb: fallbackPainPoints.slice(0, 8).map((point, index) => ({
+        description: point,
+        frequency: Math.max(1, 8 - index),
+        intensity: 6,
+        opportunity: Math.max(4, Math.min(10, Math.round(opportunityScore / 10))),
+        source: allExcerpts[index]?.source || 'Amazon',
+      })),
+      socialExcerpts: allExcerpts.slice(0, 25),
+      clusteredPainPoints: fallbackPainPoints.slice(0, 5).map((point, index) => ({
+        keyword: point.slice(0, 48),
+        count: Math.max(1, 5 - index),
+        percentage: Math.max(10, 35 - index * 5),
+        sources: {
+          amazon: amazonReviews.length ? 1 : 0,
+          reddit: allExcerpts.some((excerpt) => excerpt.source === 'Reddit') ? 1 : 0,
+          quora: allExcerpts.some((excerpt) => excerpt.source === 'Quora') ? 1 : 0,
+          forum: allExcerpts.some((excerpt) => excerpt.source === 'Forum' || excerpt.source === 'Blog') ? 1 : 0,
+        },
+        relatedTerms: [niche],
+        intensity: 6,
+        sampleQuotes: [point],
+        category: 'pain',
+      })),
+      totalMentions: Math.max(fallbackPainPoints.length, allExcerpts.length),
+      sources: socialSources,
+    };
+  };
+
+  if (options.forceFallback) {
+    console.log('Skipping AI analysis: time budget exceeded before AI phase');
+    return createDeterministicAnalysis('tempo disponibile insufficiente prima della fase AI');
+  }
 
   const systemPrompt = `You are an expert Amazon KDP market analyst specializing in REAL market validation and pain point analysis.
 
@@ -2539,13 +2747,13 @@ ${competitors.length > 0 ? JSON.stringify(competitors.map(c => ({
 })), null, 2) : 'No Amazon data available'}
 
 === REAL AMAZON CUSTOMER REVIEWS (for pain points) ===
-${amazonReviews.slice(0, 15).join('\n\n---\n\n')}
+${amazonReviews.slice(0, 8).map((review) => review.slice(0, 700)).join('\n\n---\n\n')}
 
 === REAL SOCIAL DISCUSSIONS (Reddit, Quora, Forums, YouTube - for aware demand) ===
-${socialContent.slice(0, 40000) || 'No social discussions found'}
+${socialContent.slice(0, 12000) || 'No social discussions found'}
 
 === SOURCES ===
-${socialSources.join('\n')}
+${socialSources.slice(0, 20).join('\n')}
 
 IMPORTANT: Only use pain points, quotes, and excerpts that are DIRECTLY relevant to "${niche}". 
 Do NOT include generic product reviews or comments unrelated to this specific topic.
@@ -2589,7 +2797,7 @@ Return ONLY the JSON object.`;
     return JSON.parse(jsonStr);
   };
 
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = 1;
   let lastError: Error | null = null;
   
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -2602,7 +2810,8 @@ Return ONLY the JSON object.`;
       ], {
         responseFormat: { type: 'json_object' },
         temperature: 0.4,
-        maxTokens: 8000,
+        maxTokens: 4500,
+        timeoutMs: AI_PHASE_TIMEOUT_MS,
       });
 
       if (!response.ok) {
@@ -2651,8 +2860,8 @@ Return ONLY the JSON object.`;
   }
   
   // All retries failed
-  console.error('All AI analysis attempts failed');
-  throw lastError || new Error('AI analysis failed after all retries');
+  console.error('AI analysis unavailable, using deterministic fallback');
+  return createDeterministicAnalysis(lastError?.message || 'AI analysis failed');
 }
 
 // Save analysis to database
@@ -2780,15 +2989,23 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null) {
     let amazonSources: string[] = [];
     
     try {
-      const amazonResult = await scrapeAmazonBooks(niche);
+      const amazonResult = await withStepTimeout(
+        scrapeAmazonBooks(niche),
+        AMAZON_STEP_TIMEOUT_MS,
+        'Amazon scraping',
+      );
       realBooks = amazonResult.books;
       amazonSources = amazonResult.sources;
       console.log('Got', realBooks.length, 'REAL books from Amazon');
 
-      if (realBooks.length === 0) {
+      if (realBooks.length === 0 && Date.now() - startTime < AMAZON_STEP_TIMEOUT_MS * 0.75) {
         console.log('No competitor books found on first attempt, retrying Amazon scrape once...');
         await new Promise((resolve) => setTimeout(resolve, 2500));
-        const retryAmazonResult = await scrapeAmazonBooks(niche);
+        const retryAmazonResult = await withStepTimeout(
+          scrapeAmazonBooks(niche),
+          Math.max(10000, AMAZON_STEP_TIMEOUT_MS - (Date.now() - startTime)),
+          'Amazon retry scraping',
+        );
         realBooks = retryAmazonResult.books;
         amazonSources = [...new Set([...amazonSources, ...retryAmazonResult.sources])];
         console.log('Retry result:', realBooks.length, 'REAL books from Amazon');
@@ -2815,13 +3032,17 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null) {
     let searchVolumeData: SearchVolumeData | null = null;
     
     try {
-      const [reviewResult, socialResult, youtubeResult, trendsResult, volumeResult] = await Promise.allSettled([
-        scrapeAmazonReviews(niche, bookAsins),
-        scrapeRealSocialContent(niche),
-        scrapeYouTubeComments(niche),
-        scrapeGoogleTrends(niche),
-        scrapeSearchVolume(niche)
-      ]);
+      const [reviewResult, socialResult, youtubeResult, trendsResult, volumeResult] = await withStepTimeout(
+        Promise.allSettled([
+          scrapeAmazonReviews(niche, bookAsins),
+          scrapeRealSocialContent(niche),
+          scrapeYouTubeComments(niche),
+          scrapeGoogleTrends(niche),
+          scrapeSearchVolume(niche)
+        ]),
+        PARALLEL_SOURCES_TIMEOUT_MS,
+        'Parallel source scraping',
+      );
       
       if (reviewResult.status === 'fulfilled') {
         amazonReviews = reviewResult.value.reviews;
@@ -2889,7 +3110,22 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null) {
       allSources.push(`https://trends.google.com/trends/explore?q=${encodeURIComponent(niche)}&geo=US`);
     }
     
-    const analysis = await analyzeWithAI(niche, realBooks, rawContent, amazonReviews, allSources, allExcerpts, searchVolumeData);
+    const elapsedBeforeAI = Date.now() - startTime;
+    const forceFastAnalysis = elapsedBeforeAI > AI_PHASE_LATEST_SAFE_START_MS;
+    if (forceFastAnalysis) {
+      console.log(`Skipping full AI call: elapsed before AI is ${Math.round(elapsedBeforeAI / 1000)}s`);
+    }
+
+    const analysis = await analyzeWithAI(
+      niche,
+      realBooks,
+      rawContent,
+      amazonReviews,
+      allSources,
+      allExcerpts,
+      searchVolumeData,
+      { forceFallback: forceFastAnalysis },
+    );
     analysis.sources = allSources;
     
     // OVERRIDE AI trends with REAL Google Trends data if available
