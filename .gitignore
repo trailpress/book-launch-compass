@@ -21,6 +21,7 @@ dist-check-stale
 dist-ssr
 *.local
 robots-stale.txt
+supabase/.temp/
 
 # Editor directories and files
 .vscode/*

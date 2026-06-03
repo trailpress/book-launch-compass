@@ -109,6 +109,49 @@ function calculateRoyalty(
   };
 }
 
+async function checkFirecrawl(apiKey: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: "https://example.com",
+        formats: ["markdown"],
+        onlyMainContent: true,
+      }),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      message: typeof parsed?.error === "string" ? parsed.error : null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      message: error instanceof Error ? error.message : "Firecrawl check failed",
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
 
@@ -119,6 +162,8 @@ serve(async (req) => {
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return new Response(
@@ -130,6 +175,42 @@ serve(async (req) => {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const body = await req.json();
     const action = String(body?.action || "");
+
+    if (action === "health") {
+      const { count, error: dbError } = await supabase
+        .from("niche_analyses")
+        .select("id", { count: "exact", head: true });
+
+      const shouldCheckFirecrawl = body?.checkFirecrawl === true;
+      const firecrawl = shouldCheckFirecrawl && FIRECRAWL_API_KEY
+        ? await checkFirecrawl(FIRECRAWL_API_KEY)
+        : null;
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            checkedAt: new Date().toISOString(),
+            supabase: {
+              ok: !dbError,
+              status: dbError ? "error" : "ok",
+              analysisCount: count ?? null,
+              error: dbError?.message || null,
+            },
+            secrets: {
+              lovableApiKey: LOVABLE_API_KEY ? "present" : "missing",
+              firecrawlApiKey: FIRECRAWL_API_KEY ? "present" : "missing",
+              supabaseUrl: SUPABASE_URL ? "present" : "missing",
+              supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY ? "present" : "missing",
+            },
+            firecrawl: shouldCheckFirecrawl
+              ? firecrawl ?? { ok: false, status: null, message: "FIRECRAWL_API_KEY missing" }
+              : { ok: null, status: null, message: "Skipped. Send checkFirecrawl: true to test the API key." },
+          },
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     if (action === "listRecent") {
       const requestedLimit = Number(body?.limit ?? 20);
