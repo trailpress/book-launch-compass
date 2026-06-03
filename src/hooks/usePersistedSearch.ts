@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 
 const SEARCH_STATE_KEY = "kdp_search_state";
 const STATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const ANALYSIS_RESUME_TTL_MS = 20 * 60 * 1000; // avoid reviving stale in-progress runs
 
 interface SearchState {
   query: string;
@@ -33,6 +34,26 @@ function loadState(): SearchState {
 
       // Only restore if less than 24 hours old
       if (Date.now() - hydrated.timestamp < STATE_TTL_MS) {
+        if (hydrated.isAnalyzing && !hydrated.analysisStartedAt) {
+          return {
+            ...hydrated,
+            isAnalyzing: false,
+            analysisStartedAt: null,
+          };
+        }
+
+        if (
+          hydrated.isAnalyzing &&
+          hydrated.analysisStartedAt &&
+          Date.now() - hydrated.analysisStartedAt > ANALYSIS_RESUME_TTL_MS
+        ) {
+          return {
+            ...hydrated,
+            isAnalyzing: false,
+            analysisStartedAt: null,
+          };
+        }
+
         return hydrated;
       }
     }
@@ -75,6 +96,18 @@ export function usePersistedSearch() {
           };
 
           if (Date.now() - hydrated.timestamp < STATE_TTL_MS) {
+            if (
+              hydrated.isAnalyzing &&
+              (!hydrated.analysisStartedAt || Date.now() - hydrated.analysisStartedAt > ANALYSIS_RESUME_TTL_MS)
+            ) {
+              setStateInternal({
+                ...hydrated,
+                isAnalyzing: false,
+                analysisStartedAt: null,
+              });
+              return;
+            }
+
             setStateInternal(hydrated);
           }
         } catch (err) {
@@ -135,4 +168,3 @@ export function usePersistedSearch() {
     resetSearch,
   };
 }
-

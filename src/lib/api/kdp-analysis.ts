@@ -229,6 +229,17 @@ export interface AnalysisResponse {
   error?: string;
 }
 
+interface AnalysisJobStatus {
+  id: string;
+  niche_keyword: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  analysis_id: string | null;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+  updated_at: string;
+}
+
 export interface SavedAnalysisCacheEntry {
   id: string;
   niche_keyword: string;
@@ -414,6 +425,29 @@ async function invokeAnalysisData<T>(body: Record<string, unknown>): Promise<T> 
   return data.data as T;
 }
 
+function describeAnalysisStep(step?: string | null) {
+  switch (step) {
+    case "scraping_amazon":
+      return "raccolta dati Amazon";
+    case "scraping_parallel_sources":
+      return "raccolta fonti esterne";
+    case "ai_analysis":
+      return "analisi AI";
+    case "saving_to_database":
+      return "salvataggio risultati";
+    default:
+      return step || "fase sconosciuta";
+  }
+}
+
+async function getLatestAnalysisJob(niche: string, since: string) {
+  return await invokeAnalysisData<AnalysisJobStatus | null>({
+    action: "latestJobByNiche",
+    niche,
+    since,
+  });
+}
+
 // Store the start time for polling reference
 let pollingStartTime: Date | null = null;
 
@@ -441,6 +475,8 @@ export function setPollingStartTime(startedAt?: number | null) {
 // Poll for analysis completion by checking database
 export async function pollForAnalysis(niche: string, maxAttempts: number = 180): Promise<AnalysisResponse> {
   const startTime = Date.now();
+  const staleJobAfterMs = 3 * 60 * 1000;
+  const staleJobMinimumElapsedMs = 4 * 60 * 1000;
   
   // Use the stored start time or fall back to 10 minutes ago
   const referenceTime = pollingStartTime || new Date(Date.now() - 10 * 60 * 1000);
@@ -453,6 +489,37 @@ export async function pollForAnalysis(niche: string, maxAttempts: number = 180):
     
     // Check if analysis exists for this niche (created after we started)
     const sinceTime = referenceTime.toISOString();
+
+    try {
+      const job = await getLatestAnalysisJob(niche, sinceTime);
+
+      if (job?.status === "completed" && job.analysis_id) {
+        saveLastAnalysisId(job.analysis_id);
+        return await getAnalysisById(job.analysis_id);
+      }
+
+      if (job?.status === "failed") {
+        return {
+          success: false,
+          error: `Analisi interrotta durante ${describeAnalysisStep(job.error_message)}. Riprova con una nuova ricerca.`,
+        };
+      }
+
+      if (job?.status === "running") {
+        const lastUpdate = new Date(job.updated_at || job.started_at).getTime();
+        const elapsed = Date.now() - startTime;
+        const isStale = Number.isFinite(lastUpdate) && Date.now() - lastUpdate > staleJobAfterMs;
+
+        if (isStale && elapsed > staleJobMinimumElapsedMs) {
+          return {
+            success: false,
+            error: `Analisi ferma su ${describeAnalysisStep(job.error_message)} da diversi minuti. Riprova: il vecchio processo non sta piu avanzando.`,
+          };
+        }
+      }
+    } catch (jobError) {
+      console.warn("analysis job status unavailable:", jobError);
+    }
 
     try {
       const status = await invokeAnalysisData<{

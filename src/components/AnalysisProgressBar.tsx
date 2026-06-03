@@ -134,6 +134,8 @@ export function AnalysisProgressBar({ niche, isLoading, startedAt }: AnalysisPro
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const isFinalVerification = elapsedTime > totalDuration;
+
   return (
     <div className="w-full max-w-2xl mx-auto space-y-8">
       {/* Main progress */}
@@ -145,7 +147,7 @@ export function AnalysisProgressBar({ niche, isLoading, startedAt }: AnalysisPro
         <Progress value={progress} className="h-2" />
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span>Tempo trascorso: {formatTime(elapsedTime)}</span>
-          <span>Tempo stimato: ~{Math.ceil(totalDuration / 60)} min</span>
+          <span>{isFinalVerification ? "Verifica risultati..." : "Tempo stimato: 2-5 min"}</span>
         </div>
       </div>
 
@@ -214,13 +216,14 @@ export function AnalysisProgressBar({ niche, isLoading, startedAt }: AnalysisPro
       {/* Current action detail */}
       <div className="text-center space-y-2">
         <p className="text-lg font-semibold">
-          {phases[currentPhaseIndex]?.label}...
+          {isFinalVerification ? "Controllo stato analisi..." : `${phases[currentPhaseIndex]?.label}...`}
         </p>
         <p className="text-sm text-muted-foreground">
-          {currentPhaseIndex === 0 && "Raccolta dati libri, BSR, prezzi e recensioni da Amazon"}
-          {currentPhaseIndex === 1 && "Estrazione pain points e desideri dalle recensioni dei clienti"}
-          {currentPhaseIndex === 2 && "Analisi discussioni da Reddit, Quora e forum di settore"}
-          {currentPhaseIndex === 3 && "Generazione insights strategici e raccomandazioni con AI"}
+          {isFinalVerification && "Verifico se il backend ha completato, fallito o smesso di avanzare."}
+          {!isFinalVerification && currentPhaseIndex === 0 && "Raccolta dati libri, BSR, prezzi e recensioni da Amazon"}
+          {!isFinalVerification && currentPhaseIndex === 1 && "Estrazione pain points e desideri dalle recensioni dei clienti"}
+          {!isFinalVerification && currentPhaseIndex === 2 && "Analisi discussioni da Reddit, Quora e forum di settore"}
+          {!isFinalVerification && currentPhaseIndex === 3 && "Generazione insights strategici e raccomandazioni con AI"}
         </p>
       </div>
 
