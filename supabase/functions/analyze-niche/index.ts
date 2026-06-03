@@ -290,6 +290,11 @@ interface ScrapedBook {
   publishDate: string;
 }
 
+type LocalScrapedBookInput = Partial<ScrapedBook> & {
+  imageUrl?: string;
+  publicationDate?: string;
+};
+
 interface PainPoint {
   description: string;
   frequency: number;
@@ -536,6 +541,39 @@ function normalizeCoverUrl(rawUrl: unknown, asin: string): string {
   }
 
   return normalized;
+}
+
+function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
+  if (!Array.isArray(input)) return [];
+
+  const books: ScrapedBook[] = [];
+
+  for (const rawBook of input) {
+    const book = rawBook as LocalScrapedBookInput;
+    const asin = String(book?.asin || '').match(/[A-Z0-9]{10}/i)?.[0]?.toUpperCase();
+    const title = String(book?.title || '').trim();
+    const bsr = parseIntValue(book?.bsr);
+
+    if (!asin || !title || title.length < 5 || bsr <= 0) continue;
+    if (books.some((existing) => existing.asin === asin)) continue;
+
+    books.push({
+      title: title.slice(0, 200),
+      author: String(book?.author || 'Unknown Author').trim() || 'Unknown Author',
+      asin,
+      coverUrl: normalizeCoverUrl(book?.coverUrl || book?.imageUrl || '', asin),
+      price: parseFloatValue(book?.price),
+      rating: parseFloatValue(book?.rating),
+      reviews: parseIntValue(book?.reviews),
+      bsr,
+      pages: parseIntValue(book?.pages),
+      format: String(book?.format || 'Paperback').trim() || 'Paperback',
+      publishDate: normalizePublishDate(book?.publishDate || book?.publicationDate) || '',
+      _searchPosition: books.length + 1,
+    } as ScrapedBook);
+  }
+
+  return books;
 }
 
 function normalizePublishDate(rawDate: unknown): string | null {
@@ -3143,7 +3181,7 @@ async function saveAnalysisToDatabase(niche: string, analysis: AnalysisResult, s
 }
 
 // Background analysis function with improved error handling
-async function runAnalysisInBackground(niche: string, jobId?: string | null) {
+async function runAnalysisInBackground(niche: string, jobId?: string | null, localBooksInput?: unknown) {
   const startTime = Date.now();
   
   try {
@@ -3152,33 +3190,39 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null) {
     // Step 1: Scrape REAL Amazon book data with error handling
     console.log('Step 1: Scraping REAL Amazon data...');
     await updateAnalysisJob(jobId, { status: 'running', error_message: 'scraping_amazon' });
-    let realBooks: ScrapedBook[] = [];
-    let amazonSources: string[] = [];
+    let realBooks: ScrapedBook[] = normalizeLocalScrapedBooks(localBooksInput);
+    let amazonSources: string[] = realBooks.length
+      ? [`local-personal-scraper:${niche}`]
+      : [];
     
-    try {
-      const amazonResult = await withStepTimeout(
-        scrapeAmazonBooks(niche),
-        AMAZON_STEP_TIMEOUT_MS,
-        'Amazon scraping',
-      );
-      realBooks = amazonResult.books;
-      amazonSources = amazonResult.sources;
-      console.log('Got', realBooks.length, 'REAL books from Amazon');
-
-      if (realBooks.length === 0 && Date.now() - startTime < AMAZON_STEP_TIMEOUT_MS * 0.75) {
-        console.log('No competitor books found on first attempt, retrying Amazon scrape once...');
-        await new Promise((resolve) => setTimeout(resolve, 2500));
-        const retryAmazonResult = await withStepTimeout(
+    if (realBooks.length > 0) {
+      console.log('Using local Amazon data:', realBooks.length, 'books');
+    } else {
+      try {
+        const amazonResult = await withStepTimeout(
           scrapeAmazonBooks(niche),
-          Math.max(10000, AMAZON_STEP_TIMEOUT_MS - (Date.now() - startTime)),
-          'Amazon retry scraping',
+          AMAZON_STEP_TIMEOUT_MS,
+          'Amazon scraping',
         );
-        realBooks = retryAmazonResult.books;
-        amazonSources = [...new Set([...amazonSources, ...retryAmazonResult.sources])];
-        console.log('Retry result:', realBooks.length, 'REAL books from Amazon');
+        realBooks = amazonResult.books;
+        amazonSources = amazonResult.sources;
+        console.log('Got', realBooks.length, 'REAL books from Amazon');
+
+        if (realBooks.length === 0 && Date.now() - startTime < AMAZON_STEP_TIMEOUT_MS * 0.75) {
+          console.log('No competitor books found on first attempt, retrying Amazon scrape once...');
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          const retryAmazonResult = await withStepTimeout(
+            scrapeAmazonBooks(niche),
+            Math.max(10000, AMAZON_STEP_TIMEOUT_MS - (Date.now() - startTime)),
+            'Amazon retry scraping',
+          );
+          realBooks = retryAmazonResult.books;
+          amazonSources = [...new Set([...amazonSources, ...retryAmazonResult.sources])];
+          console.log('Retry result:', realBooks.length, 'REAL books from Amazon');
+        }
+      } catch (amazonError) {
+        console.error('Amazon scraping failed (continuing with empty books):', amazonError instanceof Error ? amazonError.message : String(amazonError));
       }
-    } catch (amazonError) {
-      console.error('Amazon scraping failed (continuing with empty books):', amazonError instanceof Error ? amazonError.message : String(amazonError));
     }
 
     // Step 2: Scrape Amazon reviews, social content, YouTube, Google Trends in parallel
@@ -3449,7 +3493,7 @@ Deno.serve(async (req) => {
     }
     
     const requestBody = await req.json();
-    const { niche: rawNiche, debugAmazon } = requestBody;
+    const { niche: rawNiche, debugAmazon, localBooks, books } = requestBody;
     
     // Input validation
     if (!rawNiche || typeof rawNiche !== 'string') {
@@ -3520,7 +3564,7 @@ Deno.serve(async (req) => {
 
     // Start background analysis - this continues even after response is sent
     // @ts-expect-error - EdgeRuntime is available in Supabase Edge Functions
-    EdgeRuntime.waitUntil(runAnalysisInBackground(niche, job.id));
+    EdgeRuntime.waitUntil(runAnalysisInBackground(niche, job.id, localBooks || books));
 
     // Return immediately - client will poll database for results
     return new Response(
