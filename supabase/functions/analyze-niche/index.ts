@@ -46,6 +46,7 @@ const corsHeaders = {
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
 const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini';
 const FIRECRAWL_API_KEY = Deno.env.get('FIRECRAWL_API_KEY');
+const RAINFOREST_API_KEY = Deno.env.get('RAINFOREST_API_KEY');
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
@@ -53,9 +54,9 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const MAX_REQUESTS_PER_WINDOW = 100; // 100 requests per hour per IP
 const AI_PHASE_TIMEOUT_MS = 35000;
-const AI_PHASE_LATEST_SAFE_START_MS = 85000;
-const AMAZON_STEP_TIMEOUT_MS = 40000;
-const PARALLEL_SOURCES_TIMEOUT_MS = 35000;
+const AI_PHASE_LATEST_SAFE_START_MS = 140000;
+const AMAZON_STEP_TIMEOUT_MS = 125000;
+const PARALLEL_SOURCES_TIMEOUT_MS = 20000;
 
 // Timeout helper for fetch requests (prevents hanging)
 const FETCH_TIMEOUT_MS = 30000; // Keep scraping bounded so background jobs can finish reliably
@@ -457,6 +458,35 @@ function simplifyNicheForSearch(niche: string): string[] {
   return [...new Set(variations)];
 }
 
+function buildAmazonSearchVariations(niche: string): string[] {
+  const normalized = niche.toLowerCase().replace(/\s+/g, ' ').trim();
+  const variations = new Set<string>();
+
+  simplifyNicheForSearch(niche).forEach((item) => variations.add(item));
+
+  const withoutChecklist = normalized
+    .replace(/\b(checklist|worksheet|worksheets|template|templates|tracker|trackers|logbook|logbooks)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (withoutChecklist.length >= 4) variations.add(withoutChecklist);
+
+  if (normalized.includes('posture') || normalized.includes('ergonomic') || normalized.includes('ergonomics')) {
+    variations.add('office ergonomics');
+    variations.add('workplace ergonomics');
+    variations.add('desk posture');
+    variations.add('computer workstation ergonomics');
+  }
+
+  if (normalized.includes('planner')) {
+    variations.add(normalized.replace(/\bplanner\b/g, 'workbook').trim());
+    variations.add(normalized.replace(/\bplanner\b/g, 'journal').trim());
+  }
+
+  return Array.from(variations)
+    .filter((item) => item.length >= 4)
+    .slice(0, 5);
+}
+
 function parseIntValue(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return Math.round(value);
@@ -533,12 +563,143 @@ function normalizePublishDate(rawDate: unknown): string | null {
   return null;
 }
 
+function extractRainforestRank(value: unknown): number {
+  if (Array.isArray(value)) {
+    const booksRank = value.find((item) => {
+      const category = String((item as Record<string, unknown>)?.category || '').toLowerCase();
+      return category === 'books';
+    }) || value[0];
+
+    return parseIntValue((booksRank as Record<string, unknown>)?.rank);
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    return parseIntValue((value as Record<string, unknown>).rank);
+  }
+
+  return parseIntValue(value);
+}
+
+async function scrapeAmazonBooksWithRainforest(niche: string): Promise<{ books: ScrapedBook[]; sources: string[] }> {
+  const books: ScrapedBook[] = [];
+  const sources: string[] = [];
+
+  if (!RAINFOREST_API_KEY) {
+    console.log('RAINFOREST_API_KEY not configured, skipping Rainforest Amazon provider');
+    return { books, sources };
+  }
+
+  const variations = buildAmazonSearchVariations(niche).slice(0, 3);
+
+  for (const searchTerm of variations) {
+    if (books.filter((book) => book.bsr >= 100).length >= 5) break;
+
+    const params = new URLSearchParams({
+      api_key: RAINFOREST_API_KEY,
+      type: 'search',
+      amazon_domain: 'amazon.com',
+      search_term: `${searchTerm} book`,
+      category_id: '283155',
+      include_products_count: '10',
+      number_of_results: '10',
+      fields: [
+        'search_results.title',
+        'search_results.asin',
+        'search_results.link',
+        'search_results.image',
+        'search_results.rating',
+        'search_results.ratings_total',
+        'search_results.price',
+        'search_results.product.title',
+        'search_results.product.authors',
+        'search_results.product.bestsellers_rank',
+        'search_results.product.buybox_winner.price',
+        'search_results.product.main_image',
+        'search_results.product.rating',
+        'search_results.product.ratings_total',
+        'search_results.product.specifications',
+        'search_results.product.publication_date',
+      ].join(','),
+    });
+
+    const requestUrl = `https://api.rainforestapi.com/request?${params.toString()}`;
+    sources.push(`https://www.amazon.com/s?k=${encodeURIComponent(`${searchTerm} book`)}&i=stripbooks`);
+
+    try {
+      const response = await fetchWithTimeout(requestUrl, {}, 45000);
+      if (!response.ok) {
+        console.error('Rainforest search failed:', response.status, await response.text());
+        continue;
+      }
+
+      const payload = await response.json();
+      const results = Array.isArray(payload?.search_results) ? payload.search_results : [];
+      console.log(`Rainforest returned ${results.length} results for "${searchTerm}"`);
+
+      for (const result of results) {
+        const product = result?.product || {};
+        const asin = String(result?.asin || product?.asin || '').match(/[A-Z0-9]{10}/i)?.[0]?.toUpperCase();
+        if (!asin || books.some((book) => book.asin === asin)) continue;
+
+        const title = String(product?.title || result?.title || '').trim();
+        if (!title || title.length < 5) continue;
+
+        const price =
+          parseFloatValue(result?.price?.value) ||
+          parseFloatValue(result?.price?.raw) ||
+          parseFloatValue(product?.buybox_winner?.price?.value) ||
+          parseFloatValue(product?.buybox_winner?.price?.raw);
+        const rating = parseFloatValue(product?.rating || result?.rating);
+        const reviews = parseIntValue(product?.ratings_total || result?.ratings_total);
+        const bsr = extractRainforestRank(product?.bestsellers_rank);
+        const specifications = Array.isArray(product?.specifications) ? product.specifications : [];
+        const pagesSpec = specifications.find((item: Record<string, unknown>) => {
+          const name = String(item?.name || '').toLowerCase();
+          return name.includes('pages') || name.includes('print length');
+        });
+        const pages = parseIntValue(pagesSpec?.value);
+        const author = Array.isArray(product?.authors)
+          ? product.authors.map((item: Record<string, unknown>) => item?.name).filter(Boolean).join(', ')
+          : String(result?.authors || product?.brand || 'Unknown Author');
+
+        books.push({
+          title: title.slice(0, 200),
+          author: author || 'Unknown Author',
+          asin,
+          coverUrl: normalizeCoverUrl(product?.main_image?.link || result?.image || '', asin),
+          price,
+          rating,
+          reviews,
+          bsr,
+          pages,
+          format: 'Paperback',
+          publishDate: normalizePublishDate(product?.publication_date?.raw || product?.publication_date) || '',
+          _searchPosition: books.length + 1,
+        } as ScrapedBook);
+      }
+    } catch (error) {
+      console.error('Rainforest provider error:', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return { books, sources };
+}
+
 // Scrape REAL Amazon BEST SELLING books using DIRECT Amazon search page scrape
 async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[]; sources: string[] }> {
   console.log('Scraping REAL Amazon BEST SELLERS for:', niche);
   
   const sources: string[] = [];
   const books: ScrapedBook[] = [];
+
+  const rainforestResult = await scrapeAmazonBooksWithRainforest(niche);
+  books.push(...rainforestResult.books);
+  sources.push(...rainforestResult.sources);
+
+  if (books.filter((book) => book.bsr >= 100).length >= 3) {
+    console.log('Using Rainforest Amazon data:', books.length, 'books');
+    return { books, sources };
+  }
 
   if (!FIRECRAWL_API_KEY) {
     console.error('FIRECRAWL_API_KEY not configured');
@@ -547,11 +708,11 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
 
   try {
     // STRATEGY: try multiple query variations + retries to reduce empty competitor runs
-    const searchVariations = simplifyNicheForSearch(niche).slice(0, 1);
+    const searchVariations = buildAmazonSearchVariations(niche);
     console.log('Amazon search variations:', searchVariations.join(' | '));
 
     for (const searchNiche of searchVariations) {
-      if (books.length >= 5) break;
+      if (books.length >= 25) break;
 
       const amazonSearchUrl = `https://www.amazon.com/s?k=${encodeURIComponent(searchNiche + ' book')}&i=stripbooks&s=exact-aware-popularity-rank`;
       console.log('Scraping Amazon search page:', amazonSearchUrl);
@@ -597,7 +758,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
               },
               waitFor: 2000,
             }),
-          }, 25000);
+          }, 18000);
 
           if (!searchResponse.ok) {
             const errorBody = await searchResponse.text();
@@ -651,8 +812,8 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
       }
 
       // STRATEGY 2: If direct scrape still sparse, try search API fallback for this variation
-      if (books.length < 3) {
-        console.log('Direct scrape got few results, trying search API for variation:', searchNiche);
+      {
+        console.log('Trying search API for variation:', searchNiche);
 
         for (let attempt = 1; attempt <= 1; attempt++) {
           try {
@@ -664,7 +825,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
               },
               body: JSON.stringify({
                 query: `"${searchNiche}" book site:amazon.com/dp`,
-                limit: 15,
+                limit: 10,
                 scrapeOptions: {
                   formats: ['extract'],
                   extract: {
@@ -682,10 +843,10 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
                     },
                     prompt: 'Extract the book title, author, Best Sellers Rank (BSR number only), review count, price, rating, and page count from this Amazon book page.'
                   },
-                  waitFor: 1500
+                  waitFor: 1200
                 }
               }),
-            }, 30000);
+            }, 18000);
 
             if (!searchApiResponse.ok) {
               const errorBody = await searchApiResponse.text();
@@ -751,7 +912,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
     }
 
     // STRATEGY 3: If still < 3 books, try lightweight search (no scrape) to get ASINs from URLs
-    if (books.length < 3) {
+    if (books.length < 10) {
       console.log(`Only ${books.length} books found, trying lightweight URL search fallback...`);
       try {
         const lightSearchResponse = await fetchWithTimeout('https://api.firecrawl.dev/v1/search', {
@@ -762,9 +923,9 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
           },
           body: JSON.stringify({
             query: `${niche} book amazon best seller`,
-            limit: 20,
+            limit: 15,
           }),
-        }, 30000);
+        }, 18000);
 
         if (lightSearchResponse.ok) {
           const lightData = await lightSearchResponse.json();
@@ -812,7 +973,7 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
     // We need real BSR data to validate and confirm the best seller ranking
     // Increase to 6 books to ensure we get enough real BSR data for top 3
     // Fetch details for up to 8 books to maximize chances of getting 3+ with real BSR
-    const booksForDetailFetch = books.slice(0, 3).filter(b => 
+    const booksForDetailFetch = books.slice(0, 16).filter(b => 
       (b.asin.startsWith('B') || b.asin.match(/^[0-9]/)) && !b.asin.startsWith('TEMP')
     );
     
@@ -851,9 +1012,9 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
                 },
                 prompt: 'Extract EXACT data from this Amazon book page. For BSR (Best Sellers Rank), find the number shown after "Best Sellers Rank:" or "#" in Books category. Return just the number without commas.'
               },
-              waitFor: 1500,
+              waitFor: 1200,
             }),
-          }, 25000);
+          }, 18000);
 
           if (detailResponse.ok) {
             const detailData = await detailResponse.json();
@@ -998,6 +1159,12 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
       return true;
     }
     
+    // If we have verified BSR, keep the competitor: it came from a targeted Amazon query.
+    if (b.bsr >= 100) {
+      console.log(`✓ ACCEPTED (verified BSR): "${b.title.slice(0, 50)}..."`);
+      return true;
+    }
+
     // Check for partial match with ANY keyword
     const hasMatch = relevantWords.some(w => titleLower.includes(w));
     if (hasMatch) {
@@ -3281,7 +3448,8 @@ Deno.serve(async (req) => {
       );
     }
     
-    const { niche: rawNiche } = await req.json();
+    const requestBody = await req.json();
+    const { niche: rawNiche, debugAmazon } = requestBody;
     
     // Input validation
     if (!rawNiche || typeof rawNiche !== 'string') {
@@ -3315,6 +3483,34 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({ success: false, error: 'Niche keyword contains invalid characters. Only letters, numbers, spaces, hyphens, apostrophes, periods, commas, and ampersands are allowed.' }),
         { status: 400, headers: rateLimitHeaders }
+      );
+    }
+
+    if (debugAmazon === true) {
+      const startedAt = Date.now();
+      const result = await scrapeAmazonBooks(niche);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            niche,
+            durationSeconds: Math.round((Date.now() - startedAt) / 1000),
+            sources: result.sources,
+            bookCount: result.books.length,
+            booksWithBsr: result.books.filter((book) => book.bsr >= 100).length,
+            books: result.books.slice(0, 20).map((book) => ({
+              title: book.title,
+              asin: book.asin,
+              bsr: book.bsr,
+              price: book.price,
+              reviews: book.reviews,
+              rating: book.rating,
+              pages: book.pages,
+              sourcePosition: book._searchPosition,
+            })),
+          },
+        }),
+        { headers: rateLimitHeaders },
       );
     }
 
