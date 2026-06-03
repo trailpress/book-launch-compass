@@ -147,6 +147,13 @@ def search_books(page: Any, niche: str, max_books: int) -> list[dict[str, Any]]:
                 "publishDate": "",
                 "amazonUrl": f"https://www.amazon.com/dp/{asin}",
                 "searchPosition": len(books) + 1,
+                "fieldEvidence": {
+                    "asin": {"sourceUrl": url, "rawText": asin},
+                    "title": {"sourceUrl": url, "rawText": title[:300]},
+                    "price": {"sourceUrl": url, "rawText": str(item.get("price") or "")[:120]},
+                    "rating": {"sourceUrl": url, "rawText": str(item.get("rating") or "")[:120]},
+                    "reviews": {"sourceUrl": url, "rawText": str(item.get("reviews") or "")[:120]},
+                },
             }
         )
 
@@ -174,6 +181,10 @@ def enrich_book_detail(page: Any, book: dict[str, Any]) -> dict[str, Any]:
         match = re.search(pattern, body, re.I)
         if match:
             book["bsr"] = parse_int(match.group(1))
+            book.setdefault("fieldEvidence", {})["bsr"] = {
+                "sourceUrl": book["amazonUrl"],
+                "rawText": match.group(0)[:300],
+            }
             break
 
     pages_patterns = [
@@ -185,12 +196,20 @@ def enrich_book_detail(page: Any, book: dict[str, Any]) -> dict[str, Any]:
         match = re.search(pattern, body, re.I)
         if match:
             book["pages"] = parse_int(match.group(1))
+            book.setdefault("fieldEvidence", {})["pages"] = {
+                "sourceUrl": book["amazonUrl"],
+                "rawText": match.group(0)[:300],
+            }
             break
 
     if not book["price"]:
         try:
             price_text = page.locator(".a-price .a-offscreen").first.inner_text(timeout=2000)
             book["price"] = parse_float(price_text)
+            book.setdefault("fieldEvidence", {})["price"] = {
+                "sourceUrl": book["amazonUrl"],
+                "rawText": price_text[:120],
+            }
         except PlaywrightTimeoutError:
             pass
 
@@ -198,15 +217,27 @@ def enrich_book_detail(page: Any, book: dict[str, Any]) -> dict[str, Any]:
         rating_match = re.search(r"([0-5](?:\.\d)?)\s+out of 5 stars", body, re.I)
         if rating_match:
             book["rating"] = parse_float(rating_match.group(1))
+            book.setdefault("fieldEvidence", {})["rating"] = {
+                "sourceUrl": book["amazonUrl"],
+                "rawText": rating_match.group(0)[:120],
+            }
 
     if not book["reviews"]:
         review_match = re.search(r"([\d,]+)\s+(?:ratings|customer reviews)", body, re.I)
         if review_match:
             book["reviews"] = parse_int(review_match.group(1))
+            book.setdefault("fieldEvidence", {})["reviews"] = {
+                "sourceUrl": book["amazonUrl"],
+                "rawText": review_match.group(0)[:120],
+            }
 
     date_match = re.search(r"Publication date\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", body, re.I)
     if date_match:
         book["publishDate"] = date_match.group(1)
+        book.setdefault("fieldEvidence", {})["publishDate"] = {
+            "sourceUrl": book["amazonUrl"],
+            "rawText": date_match.group(0)[:160],
+        }
 
     return book
 

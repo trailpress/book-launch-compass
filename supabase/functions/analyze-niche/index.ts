@@ -1947,7 +1947,6 @@ async function scrapeGoogleTrends(niche: string): Promise<GoogleTrendsData | nul
       }
     }
 
-    // Generate 12-month data based on extracted info or realistic estimates
     const months = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
     const now = new Date();
     labels = [];
@@ -1956,38 +1955,11 @@ async function scrapeGoogleTrends(niche: string): Promise<GoogleTrendsData | nul
       labels.push(months[monthIndex]);
     }
 
-    // If we don't have enough real data, generate realistic trending data
     if (timeSeriesData.length < 6) {
-      console.log('Generating trend data based on direction:', extractedDirection);
-      
-      const baseValue = extractedInterest || 50;
-      timeSeriesData = [];
-      
-      for (let i = 0; i < 12; i++) {
-        let value = baseValue;
-
-        // Deterministic noise seeded by niche + index (no Math.random)
-        const noise = (seededNoise(`trends|${niche}|${i}`) - 0.5) * 2; // [-1, 1)
-
-        if (extractedDirection === 'growing' || extractedDirection === 'rising') {
-          value = baseValue - 15 + (i * 2.5) + noise * 5;
-        } else if (extractedDirection === 'declining' || extractedDirection === 'falling') {
-          value = baseValue + 15 - (i * 2.5) + noise * 5;
-        } else {
-          value = baseValue + noise * 7.5;
-        }
-
-        const seasonalFactor = Math.sin((i / 12) * Math.PI * 2) * 8;
-        value += seasonalFactor;
-
-        timeSeriesData.push(Math.min(100, Math.max(5, Math.round(value))));
-      }
+      console.log('Google Trends data unavailable or incomplete; not generating synthetic trend data.');
+      return null;
     }
 
-    // Ensure exactly 12 data points
-    while (timeSeriesData.length < 12) {
-      timeSeriesData.unshift(timeSeriesData[0] || 50);
-    }
     timeSeriesData = timeSeriesData.slice(-12);
     
     // Calculate trend metrics
@@ -2120,44 +2092,6 @@ async function scrapeSearchVolume(niche: string): Promise<SearchVolumeData | nul
       }
       
       if (volumes.length >= 2) break; // Got enough data points
-    }
-
-    // Also try using AI to estimate based on Google Trends data we already have
-    if (volumes.length === 0) {
-      console.log('No direct volume data found, using AI estimation with Google Trends correlation...');
-      
-      try {
-        const aiResponse = await callAIChat([
-          {
-            role: 'system',
-            content: 'You are a keyword research expert. Given a keyword, estimate its monthly search volume on Google (US market). Use your training data knowledge of real keyword volumes from SEO tools. Return ONLY a JSON object with: {"volume": number, "confidence": "high"|"medium"|"low", "reasoning": "brief explanation"}. Be conservative - do NOT inflate numbers.'
-          },
-          {
-            role: 'user',
-            content: `Estimate the monthly Google search volume (US market) for: "${niche}". Consider related keyword variations. Return ONLY JSON.`
-          }
-        ], {
-          responseFormat: { type: 'json_object' },
-          temperature: 0.2,
-          maxTokens: 600,
-        });
-
-        if (aiResponse.ok) {
-          const aiData = await aiResponse.json();
-          const content = aiData.choices?.[0]?.message?.content || '';
-          const jsonMatch = content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            if (parsed.volume && parsed.volume > 0) {
-              volumes.push(parsed.volume);
-              bestSource = `AI estimate (${parsed.confidence} confidence): ${parsed.reasoning || ''}`;
-              console.log(`AI estimated volume: ${parsed.volume} (${parsed.confidence})`);
-            }
-          }
-        }
-      } catch (aiErr) {
-        console.log('AI volume estimation failed:', aiErr);
-      }
     }
 
     if (volumes.length === 0) {
@@ -2486,8 +2420,9 @@ async function analyzeWithAI(
       pages: book.pages || 0,
       trend: hasRealBsr ? (bsr < 50000 ? 'up' : bsr < 100000 ? 'stable' : 'down') : 'stable' as "up" | "stable" | "down",
       publishDate: normalizePublishDate(book.publishDate) || '',
-      // Only generate historical data if we have real BSR
-      historicalData: hasRealBsr ? generateHistoricalData(bsr, book.reviews || 0, price) : {
+      // Historical data is only shown when a provider supplies real history.
+      // A current BSR can support current sales estimates, but it is not a historical series.
+      historicalData: {
         dates: [],
         bsr: [],
         price: [],
@@ -2618,18 +2553,18 @@ async function analyzeWithAI(
         direction: searchVolumeData && searchVolumeData.score >= 60 ? 'growing' : 'stable',
         seasonality: 'moderate',
         viability: opportunityScore >= 65 ? 'strong' : opportunityScore >= 45 ? 'moderate' : 'weak',
-        data: [42, 45, 47, 46, 50, 52, 51, 53, 55, 54, 56, 58],
-        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-        narrative: 'Trend stimato in modalita rapida: usare questi dati come indicazione preliminare e validare con ricerche aggiuntive prima della decisione finale.',
+        data: [],
+        labels: [],
+        narrative: 'Trend non disponibile: nessuna serie temporale reale verificata e nessun dato sintetico generato.',
         yearOverYear: 0,
-        yearOverYearText: 'Dato annuale non disponibile nella modalita rapida.',
+        yearOverYearText: 'Dato annuale non disponibile da fonte verificata.',
         seasonalPattern: {
-          description: 'Stagionalita da validare con dati aggiuntivi.',
+          description: 'Stagionalita non disponibile da fonte verificata.',
           peakMonths: [],
-          explanation: 'La modalita rapida privilegia il completamento dell analisi evitando timeout della funzione.',
+          explanation: 'La modalita verificata non ricostruisce trend o stagionalita se non sono stati raccolti dati reali.',
         },
-        keyPatterns: ['Analisi rapida basata su BSR, prezzi, recensioni e fonti raccolte.'],
-        forecast: 'Pubblicare solo con un angolo differenziante e dopo una verifica manuale dei competitor principali.',
+        keyPatterns: ['Nessun pattern temporale generato senza dati reali.'],
+        forecast: 'Previsione non disponibile senza dati storici verificati.',
       },
       profit: {
         conservative: {
@@ -2706,12 +2641,19 @@ async function analyzeWithAI(
     return createDeterministicAnalysis('tempo disponibile insufficiente prima della fase AI');
   }
 
-  const systemPrompt = `You are an expert Amazon KDP market analyst specializing in REAL market validation and pain point analysis.
+const systemPrompt = `You are an expert Amazon KDP market analyst specializing in REAL market validation and pain point analysis.
 
 You will receive:
 1. REAL book data scraped from Amazon (sorted by BSR - lowest first = best sellers)
 2. REAL discussions from Reddit, Quora, YouTube comments, and forums
 3. REAL Amazon customer reviews from the actual books found
+
+VERIFIED-ONLY RULES:
+- Never invent, infer, or fill missing Amazon metrics. BSR, price, rating, review count, pages, and publish date must come from the provided data only.
+- Never invent social comments, Reddit/Quora excerpts, Amazon reviews, quotes, search volume, or Google Trends values.
+- If a field has no verified source data, return an empty array, 0, null-equivalent text, or "non disponibile da fonte verificata" as appropriate.
+- You may calculate derived estimates only when their inputs are present: sales may be estimated from real BSR, revenue from estimated sales x real price, and profit from real price/page count assumptions.
+- Clearly describe derived values as estimates/calculations, not as observed Amazon facts.
 
 CRITICAL PROFITABILITY CRITERIA FOR KDP:
 - BSR < 100,000 = REAL sales potential (books actually selling)
@@ -2793,9 +2735,9 @@ Return your analysis as a valid JSON object with this structure:
     "direction": "growing|stable|declining",
     "seasonality": "high|moderate|low",
     "viability": "strong|moderate|weak",
-    "data": [12 values 0-100 representing Google Trends-style interest over 12 months],
-    "labels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-    "narrative": "Detailed Italian paragraph analyzing the trend: describe the overall interest pattern, seasonal peaks, general behavior over the analyzed period. Write in Italian, 3-5 sentences.",
+    "data": [only verified Google Trends values; empty array if unavailable],
+    "labels": ["only labels for verified trend values; empty array if unavailable"],
+    "narrative": "Italian paragraph based only on verified trend values, or say trend data is unavailable from verified sources.",
     "yearOverYear": number percentage change year-over-year (e.g. 15 means +15%),
     "yearOverYearText": "Italian paragraph comparing this year vs last year. Describe specific changes in peaks and valleys.",
     "seasonalPattern": {
@@ -2894,6 +2836,7 @@ Return your analysis as a valid JSON object with this structure:
 }
 
 CRITICAL: Base ALL scores on REAL data provided. If BSR data shows books under 100K, that's evidence of real sales.
+CRITICAL: If source data is missing, say it is missing. Do not use your training data or generic market knowledge to fill missing values.
 
 LANGUAGE RULES (MANDATORY):
 - Target market is Amazon KDP USA. ALL book titles, subtitles, and fullTitle fields (in "strategy.suggestedTitle", "strategy.suggestedSubtitle", and every entry of "suggestedTitles") MUST be written in ENGLISH using direct response copywriting. NEVER write them in Italian.

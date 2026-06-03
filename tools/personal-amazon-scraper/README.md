@@ -28,6 +28,18 @@ Il file viene salvato in:
 tools/personal-amazon-scraper/output/
 ```
 
+## Regola dati verificati
+
+Lo scraper salva solo dati osservati sulla pagina:
+
+- ASIN, titolo, prezzo, rating, recensioni, BSR, pagine e data pubblicazione
+  arrivano da Amazon.
+- Ogni libro contiene `amazonUrl` e `fieldEvidence`, con il testo grezzo usato
+  per leggere i campi principali.
+- Se un campo non viene trovato, resta vuoto o a `0`: non viene inventato.
+- Vendite, fatturato e profitto non sono dati Amazon osservati: sono calcoli
+  derivati dal BSR/prezzo/pagine reali e vanno letti come stime.
+
 ## Invio a KDPIntel
 
 Dopo aver controllato il JSON:
