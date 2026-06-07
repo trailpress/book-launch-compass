@@ -450,6 +450,45 @@ async function getLatestAnalysisJob(niche: string, since: string) {
 
 // Store the start time for polling reference
 let pollingStartTime: Date | null = null;
+const LOCAL_SCRAPER_PORT = 8788;
+
+function getLocalScraperBaseUrl() {
+  const host = window.location.hostname || "127.0.0.1";
+  const scraperHost = host === "localhost" ? "127.0.0.1" : host;
+  return `http://${scraperHost}:${LOCAL_SCRAPER_PORT}`;
+}
+
+async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boolean; error?: string }> {
+  const baseUrl = getLocalScraperBaseUrl();
+
+  try {
+    const healthResponse = await fetch(`${baseUrl}/health`, { method: "GET" });
+    if (!healthResponse.ok) {
+      return { started: false, error: "Il raccoglitore locale non risponde correttamente." };
+    }
+  } catch {
+    return {
+      started: false,
+      error: `Raccoglitore locale non attivo. Avvialo sul Mac e poi riprova. Indirizzo atteso: ${baseUrl}`,
+    };
+  }
+
+  const response = await fetch(`${baseUrl}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, headful: true }),
+  });
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok || payload?.ok === false) {
+    return {
+      started: false,
+      error: payload?.error || "Raccolta dati verificati non completata.",
+    };
+  }
+
+  return { started: true };
+}
 
 function calculateRiskScore({
   profitabilityScore,
@@ -606,41 +645,23 @@ export async function analyzeNiche(niche: string): Promise<AnalysisResponse> {
     pollingStartTime = new Date();
     
     console.log('Starting analysis for:', niche);
-    
-    // Start the edge function - it returns immediately with "processing" status
-    const { data, error } = await supabase.functions.invoke('analyze-niche', {
-      body: { niche }
-    });
-    
-    if (error) {
-      console.log('Function returned error:', error.message);
-      // Still try polling - the background task might be running
-    } else {
-      console.log('Function response:', data);
+
+    const localStart = await startVerifiedLocalAnalysis(niche);
+    if (!localStart.started) {
+      return {
+        success: false,
+        error: localStart.error || "Raccoglitore locale non disponibile.",
+      };
     }
-    
-    // Check if we got a "processing" response (background mode)
-    if (data?.success && data?.data?.status === 'processing') {
-      console.log('Background processing started, polling for results...');
-    }
-    
-    // Check if we got a complete analysis (unlikely but possible)
-    if (data?.success && data?.data?.analysisId && data?.data?.scores) {
-      console.log('Got immediate result with analysisId:', data.data.analysisId);
-      saveLastAnalysisId(data.data.analysisId);
-      return data as AnalysisResponse;
-    }
-    
-    // Poll for results in database - this is the expected path
-    console.log('Starting database polling...');
+
+    console.log('Verified local collection started, polling for Supabase result...');
     return await pollForAnalysis(niche);
-    
   } catch (err) {
     console.error('Error calling analyze-niche:', err);
-    
-    // Even on error, try polling as the background task might have started
-    console.log('Function call failed, attempting to poll for results...');
-    return await pollForAnalysis(niche);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Raccolta verificata non avviata.",
+    };
   }
 }
 

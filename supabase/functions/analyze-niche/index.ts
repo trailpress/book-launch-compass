@@ -292,6 +292,7 @@ interface ScrapedBook {
 
 type LocalScrapedBookInput = Partial<ScrapedBook> & {
   imageUrl?: string;
+  priceCurrency?: string;
   publicationDate?: string;
 };
 
@@ -553,6 +554,8 @@ function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
     const asin = String(book?.asin || '').match(/[A-Z0-9]{10}/i)?.[0]?.toUpperCase();
     const title = String(book?.title || '').trim();
     const bsr = parseIntValue(book?.bsr);
+    const priceCurrency = String(book?.priceCurrency || '').trim().toUpperCase();
+    const price = priceCurrency && priceCurrency !== 'USD' ? 0 : parseFloatValue(book?.price);
 
     if (!asin || !title || title.length < 5 || bsr <= 0) continue;
     if (books.some((existing) => existing.asin === asin)) continue;
@@ -562,7 +565,7 @@ function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
       author: String(book?.author || 'Unknown Author').trim() || 'Unknown Author',
       asin,
       coverUrl: normalizeCoverUrl(book?.coverUrl || book?.imageUrl || '', asin),
-      price: parseFloatValue(book?.price),
+      price,
       rating: parseFloatValue(book?.rating),
       reviews: parseIntValue(book?.reviews),
       bsr,

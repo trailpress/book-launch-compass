@@ -48,6 +48,17 @@ def parse_float(value: Any) -> float:
     return float(match.group(1)) if match else 0.0
 
 
+def detect_currency(value: Any) -> str:
+    text = str(value or "")
+    if "$" in text or "USD" in text.upper():
+        return "USD"
+    if "€" in text or "EUR" in text.upper():
+        return "EUR"
+    if "£" in text or "GBP" in text.upper():
+        return "GBP"
+    return ""
+
+
 def load_env_file(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     if not path.exists():
@@ -75,25 +86,41 @@ def detect_blocked_page(text: str) -> bool:
     )
 
 
-def search_books(page: Any, niche: str, max_books: int) -> list[dict[str, Any]]:
-    query = f"{niche} book"
-    url = "https://www.amazon.com/s?" + urllib.parse.urlencode(
-        {
-            "k": query,
-            "i": "stripbooks",
-            "s": "exact-aware-popularity-rank",
-        }
-    )
+def build_search_queries(niche: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", niche.strip().lower())
+    queries = [
+        normalized,
+        f"{normalized} book",
+        f"{normalized} books",
+        f"{normalized} guidebook",
+    ]
 
-    print(f"Apro ricerca Amazon: {query}")
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    sleep_like_a_person(3.0, 6.0)
+    without_book_words = re.sub(r"\b(book|books|guidebook|guidebooks)\b", "", normalized).strip()
+    if without_book_words:
+        queries.extend([
+            f"{without_book_words} book",
+            f"{without_book_words} guidebook",
+        ])
 
-    body = page.locator("body").inner_text(timeout=10000)
-    if detect_blocked_page(body):
-        raise RuntimeError("Amazon ha mostrato un blocco/captcha. Apri lo scraper in modalita' visibile e riprova piu' tardi.")
+    if "travel guide" in normalized:
+        destination = normalized.replace("travel guide", "").strip()
+        if destination:
+            queries.extend([
+                f"{destination} travel guide",
+                f"{destination} guidebook",
+                f"{destination} hiking guide",
+            ])
 
-    items = page.eval_on_selector_all(
+    result: list[str] = []
+    for query in queries:
+        cleaned = re.sub(r"\s+", " ", query).strip()
+        if cleaned and cleaned not in result:
+            result.append(cleaned)
+    return result[:8]
+
+
+def extract_search_items(page: Any) -> list[dict[str, Any]]:
+    return page.eval_on_selector_all(
         '[data-component-type="s-search-result"]',
         """nodes => nodes.map((node, index) => {
           const text = (selector) => node.querySelector(selector)?.textContent?.trim() || "";
@@ -112,53 +139,87 @@ def search_books(page: Any, niche: str, max_books: int) -> list[dict[str, Any]]:
         })""",
     )
 
+
+def search_books(page: Any, niche: str, max_candidates: int) -> list[dict[str, Any]]:
     seen: set[str] = set()
     books: list[dict[str, Any]] = []
 
-    for item in items:
-        asin = str(item.get("asin") or "").upper()
-        if not asin:
-            match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", str(item.get("link") or ""), re.I)
-            asin = match.group(1).upper() if match else ""
-
-        title = str(item.get("title") or "").strip()
-        if not asin or asin in seen or len(title) < 5:
-            continue
-
-        seen.add(asin)
-        authors = [
-            candidate
-            for candidate in item.get("authorCandidates", [])
-            if candidate and not re.search(r"paperback|hardcover|kindle|audible|\$", candidate, re.I)
-        ]
-
-        books.append(
-            {
-                "title": title[:220],
-                "author": authors[0] if authors else "Unknown Author",
-                "asin": asin,
-                "coverUrl": item.get("imageUrl") or "",
-                "price": parse_float(item.get("price")),
-                "rating": parse_float(item.get("rating")),
-                "reviews": parse_int(item.get("reviews")),
-                "bsr": 0,
-                "pages": 0,
-                "format": "Paperback",
-                "publishDate": "",
-                "amazonUrl": f"https://www.amazon.com/dp/{asin}",
-                "searchPosition": len(books) + 1,
-                "fieldEvidence": {
-                    "asin": {"sourceUrl": url, "rawText": asin},
-                    "title": {"sourceUrl": url, "rawText": title[:300]},
-                    "price": {"sourceUrl": url, "rawText": str(item.get("price") or "")[:120]},
-                    "rating": {"sourceUrl": url, "rawText": str(item.get("rating") or "")[:120]},
-                    "reviews": {"sourceUrl": url, "rawText": str(item.get("reviews") or "")[:120]},
-                },
-            }
-        )
-
-        if len(books) >= max_books:
+    for query in build_search_queries(niche):
+        if len(books) >= max_candidates:
             break
+
+        for page_number in [1, 2]:
+            if len(books) >= max_candidates:
+                break
+
+            params = {
+                "k": query,
+                "i": "stripbooks",
+                "s": "exact-aware-popularity-rank",
+            }
+            if page_number > 1:
+                params["page"] = str(page_number)
+            url = "https://www.amazon.com/s?" + urllib.parse.urlencode(params)
+
+            print(f"Apro ricerca Amazon: {query} (pagina {page_number})")
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            sleep_like_a_person(3.0, 6.0)
+
+            body = page.locator("body").inner_text(timeout=10000)
+            if detect_blocked_page(body):
+                raise RuntimeError("Amazon ha mostrato un blocco/captcha. Apri lo scraper in modalita' visibile e riprova piu' tardi.")
+
+            items = extract_search_items(page)
+            print(f"Candidati trovati in questa ricerca: {len(items)}")
+
+            for item in items:
+                asin = str(item.get("asin") or "").upper()
+                if not asin:
+                    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", str(item.get("link") or ""), re.I)
+                    asin = match.group(1).upper() if match else ""
+
+                title = str(item.get("title") or "").strip()
+                if not asin or asin in seen or len(title) < 5:
+                    continue
+
+                seen.add(asin)
+                authors = [
+                    candidate
+                    for candidate in item.get("authorCandidates", [])
+                    if candidate
+                    and candidate.strip().lower() != "by"
+                    and not re.search(r"paperback|hardcover|kindle|audible|\$", candidate, re.I)
+                ]
+
+                books.append(
+                    {
+                        "title": title[:220],
+                        "author": authors[0] if authors else "Unknown Author",
+                        "asin": asin,
+                        "coverUrl": item.get("imageUrl") or "",
+                        "price": parse_float(item.get("price")),
+                        "priceCurrency": detect_currency(item.get("price")),
+                        "rating": parse_float(item.get("rating")),
+                        "reviews": parse_int(item.get("reviews")),
+                        "bsr": 0,
+                        "pages": 0,
+                        "format": "Paperback",
+                        "publishDate": "",
+                        "amazonUrl": f"https://www.amazon.com/dp/{asin}",
+                        "searchPosition": len(books) + 1,
+                        "searchQuery": query,
+                        "fieldEvidence": {
+                            "asin": {"sourceUrl": url, "rawText": asin},
+                            "title": {"sourceUrl": url, "rawText": title[:300]},
+                            "price": {"sourceUrl": url, "rawText": str(item.get("price") or "")[:120]},
+                            "rating": {"sourceUrl": url, "rawText": str(item.get("rating") or "")[:120]},
+                            "reviews": {"sourceUrl": url, "rawText": str(item.get("reviews") or "")[:120]},
+                        },
+                    }
+                )
+
+                if len(books) >= max_candidates:
+                    break
 
     return books
 
@@ -171,6 +232,28 @@ def enrich_book_detail(page: Any, book: dict[str, Any]) -> dict[str, Any]:
     body = page.locator("body").inner_text(timeout=15000)
     if detect_blocked_page(body):
         raise RuntimeError("Amazon ha mostrato un blocco/captcha durante la lettura del prodotto.")
+
+    if not book.get("author") or str(book.get("author")).strip().lower() in {"by", "unknown author"}:
+        try:
+            authors = page.eval_on_selector_all(
+                '#bylineInfo .author a, #bylineInfo a.contributorNameID, .author a, a.contributorNameID',
+                """nodes => nodes.map((node) => node.textContent?.trim() || "").filter(Boolean)""",
+            )
+            clean_authors = [
+                author
+                for author in authors
+                if author and author.strip().lower() != "by" and len(author.strip()) > 1
+            ]
+            if clean_authors:
+                book["author"] = ", ".join(dict.fromkeys(clean_authors))
+                book.setdefault("fieldEvidence", {})["author"] = {
+                    "sourceUrl": book["amazonUrl"],
+                    "rawText": book["author"][:200],
+                }
+            else:
+                book["author"] = "Unknown Author"
+        except Exception:
+            book["author"] = "Unknown Author"
 
     bsr_patterns = [
         r"Best Sellers Rank\s*#?([\d,]+)\s+in\s+Books",
@@ -206,6 +289,7 @@ def enrich_book_detail(page: Any, book: dict[str, Any]) -> dict[str, Any]:
         try:
             price_text = page.locator(".a-price .a-offscreen").first.inner_text(timeout=2000)
             book["price"] = parse_float(price_text)
+            book["priceCurrency"] = detect_currency(price_text)
             book.setdefault("fieldEvidence", {})["price"] = {
                 "sourceUrl": book["amazonUrl"],
                 "rawText": price_text[:120],
@@ -284,12 +368,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Personal Amazon KDP scraper for KDPIntel.")
     parser.add_argument("niche", help="Keyword/niche da analizzare")
     parser.add_argument("--max-books", type=int, default=8, help="Numero massimo di libri da leggere")
+    parser.add_argument("--min-bsr-books", type=int, default=3, help="Numero minimo di libri con BSR reale richiesto")
     parser.add_argument("--headful", action="store_true", help="Mostra il browser mentre raccoglie i dati")
     parser.add_argument("--submit", action="store_true", help="Invia i dati raccolti all'analisi KDPIntel")
     args = parser.parse_args()
 
     if args.max_books < 1 or args.max_books > 20:
         raise SystemExit("--max-books deve essere tra 1 e 20.")
+    if args.min_bsr_books < 1 or args.min_bsr_books > args.max_books:
+        raise SystemExit("--min-bsr-books deve essere tra 1 e --max-books.")
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch_persistent_context(
@@ -303,18 +390,26 @@ def main() -> int:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         )
+        browser.add_cookies([
+            {"name": "i18n-prefs", "value": "USD", "domain": ".amazon.com", "path": "/"},
+            {"name": "lc-main", "value": "en_US", "domain": ".amazon.com", "path": "/"},
+        ])
         page = browser.new_page()
 
         try:
-            books = search_books(page, args.niche, args.max_books)
+            candidate_limit = max(args.max_books * 4, 24)
+            books = search_books(page, args.niche, candidate_limit)
             print(f"Trovati {len(books)} candidati. Ora leggo le schede prodotto.")
 
             enriched: list[dict[str, Any]] = []
             for book in books:
+                if len(enriched) >= args.max_books:
+                    break
                 try:
                     enriched_book = enrich_book_detail(page, book)
                     if int(enriched_book.get("bsr") or 0) > 0:
                         enriched.append(enriched_book)
+                        print(f"BSR valido raccolto: {len(enriched)}/{args.min_bsr_books} minimo, {args.max_books} massimo")
                     else:
                         print(f"Scarto senza BSR: {book['asin']} - {book['title'][:70]}")
                 except Exception as error:
@@ -327,9 +422,14 @@ def main() -> int:
     print(f"Salvato: {output_path}")
     print(f"Libri con BSR reale: {len(enriched)}")
 
+    if len(enriched) < args.min_bsr_books:
+        raise SystemExit(
+            f"Solo {len(enriched)} libri con BSR reale trovati. "
+            f"Minimo richiesto: {args.min_bsr_books}. "
+            "Riprova piu' tardi o con una keyword leggermente piu' ampia."
+        )
+
     if args.submit:
-        if not enriched:
-            raise SystemExit("Nessun libro con BSR reale: non invio l'analisi.")
         result = submit_to_kdpintel(args.niche, enriched)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 

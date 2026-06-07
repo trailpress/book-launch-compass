@@ -13,6 +13,11 @@ lerna-debug.log*
 !.env.example
 
 node_modules
+.venv-scraper
+.local/
+tools/personal-amazon-scraper/output/
+__pycache__/
+*.pyc
 dist
 dist-*
 dist-check

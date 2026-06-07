@@ -19,7 +19,7 @@ python -m playwright install chromium
 ## Raccolta dati
 
 ```bash
-python tools/personal-amazon-scraper/scrape_amazon_kdp.py "anxiety workbook" --max-books 8 --headful
+python tools/personal-amazon-scraper/scrape_amazon_kdp.py "anxiety workbook" --max-books 8 --min-bsr-books 3 --headful
 ```
 
 Il file viene salvato in:
@@ -39,14 +39,35 @@ Lo scraper salva solo dati osservati sulla pagina:
 - Se un campo non viene trovato, resta vuoto o a `0`: non viene inventato.
 - Vendite, fatturato e profitto non sono dati Amazon osservati: sono calcoli
   derivati dal BSR/prezzo/pagine reali e vanno letti come stime.
+- Prima di fallire prova piu' varianti di ricerca Amazon e piu' candidati; per
+  default richiede almeno 3 libri con BSR reale.
 
 ## Invio a KDPIntel
 
 Dopo aver controllato il JSON:
 
 ```bash
-python tools/personal-amazon-scraper/scrape_amazon_kdp.py "anxiety workbook" --max-books 8 --headful --submit
+python tools/personal-amazon-scraper/scrape_amazon_kdp.py "anxiety workbook" --max-books 8 --min-bsr-books 3 --headful --submit
 ```
+
+## Uso dall'app
+
+Per far usare lo scraper direttamente al bottone dell'app:
+
+```bash
+cd "/Users/Pippo/Documents/Porting from Lovable/Book Launch Compass"
+source .venv-scraper/bin/activate
+python tools/personal-amazon-scraper/local_scraper_server.py
+```
+
+Poi lascia quella finestra aperta e usa l'app su:
+
+```text
+http://localhost:8080/
+```
+
+Da iPhone, sulla stessa rete, l'app chiamera' il raccoglitore sul Mac usando lo
+stesso indirizzo di rete.
 
 Se Amazon mostra captcha o blocchi, lo scraper si ferma. Per uso personale va
 tenuto lento e con pochi risultati.
