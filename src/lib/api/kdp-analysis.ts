@@ -476,7 +476,7 @@ async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boo
   const response = await fetch(`${baseUrl}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, headful: true }),
+    body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, zipCode: "10001", headful: true }),
   });
   const payload = await response.json().catch(() => null);
 

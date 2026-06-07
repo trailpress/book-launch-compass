@@ -32,6 +32,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 PROFILE_DIR = ROOT / ".local" / "amazon-playwright-profile"
+DEFAULT_US_ZIP_CODE = "10001"
 
 
 def sleep_like_a_person(min_seconds: float = 2.0, max_seconds: float = 5.0) -> None:
@@ -84,6 +85,43 @@ def detect_blocked_page(text: str) -> bool:
             "automated access",
         ]
     )
+
+
+def set_us_delivery_location(page: Any, zip_code: str) -> bool:
+    print(f"Imposto mercato Amazon USA con CAP {zip_code}")
+    page.goto("https://www.amazon.com/?language=en_US&currency=USD", wait_until="domcontentloaded", timeout=45000)
+    sleep_like_a_person(2.0, 4.0)
+
+    body = page.locator("body").inner_text(timeout=10000)
+    if detect_blocked_page(body):
+        raise RuntimeError("Amazon ha mostrato un blocco/captcha mentre impostavo il mercato USA.")
+
+    try:
+        page.locator("#nav-global-location-popover-link").click(timeout=5000)
+        sleep_like_a_person(1.0, 2.0)
+        zip_input = page.locator("#GLUXZipUpdateInput")
+        zip_input.fill(zip_code, timeout=5000)
+        page.locator("#GLUXZipUpdate").click(timeout=5000)
+        sleep_like_a_person(2.0, 3.5)
+
+        done_buttons = [
+            "#GLUXConfirmClose",
+            "span[data-action='GLUXConfirmAction'] input",
+            "button[name='glowDoneButton']",
+        ]
+        for selector in done_buttons:
+            try:
+                if page.locator(selector).first.isVisible():
+                    page.locator(selector).first.click(timeout=3000)
+                    break
+            except Exception:
+                continue
+
+        sleep_like_a_person(1.0, 2.0)
+        return True
+    except Exception as error:
+        print(f"Non sono riuscito a impostare il CAP via interfaccia Amazon: {error}")
+        return False
 
 
 def build_search_queries(niche: str) -> list[str]:
@@ -334,6 +372,8 @@ def save_payload(niche: str, books: list[dict[str, Any]]) -> Path:
         "niche": niche,
         "collectedAt": datetime.now(timezone.utc).isoformat(),
         "source": "personal-amazon-playwright",
+        "marketplace": "amazon.com",
+        "market": "US",
         "books": books,
         "booksWithBsr": len([book for book in books if int(book.get("bsr") or 0) > 0]),
     }
@@ -369,6 +409,7 @@ def main() -> int:
     parser.add_argument("niche", help="Keyword/niche da analizzare")
     parser.add_argument("--max-books", type=int, default=8, help="Numero massimo di libri da leggere")
     parser.add_argument("--min-bsr-books", type=int, default=3, help="Numero minimo di libri con BSR reale richiesto")
+    parser.add_argument("--zip-code", default=DEFAULT_US_ZIP_CODE, help="CAP USA usato per prezzi e disponibilita Amazon.com")
     parser.add_argument("--headful", action="store_true", help="Mostra il browser mentre raccoglie i dati")
     parser.add_argument("--submit", action="store_true", help="Invia i dati raccolti all'analisi KDPIntel")
     args = parser.parse_args()
@@ -397,6 +438,7 @@ def main() -> int:
         page = browser.new_page()
 
         try:
+            set_us_delivery_location(page, args.zip_code)
             candidate_limit = max(args.max_books * 4, 24)
             books = search_books(page, args.niche, candidate_limit)
             print(f"Trovati {len(books)} candidati. Ora leggo le schede prodotto.")

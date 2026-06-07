@@ -68,6 +68,7 @@ class Handler(BaseHTTPRequestHandler):
             niche = str(payload.get("niche") or "").strip()
             max_books = int(payload.get("maxBooks") or 8)
             min_bsr_books = int(payload.get("minBsrBooks") or 3)
+            zip_code = str(payload.get("zipCode") or "10001").strip()
             headful = bool(payload.get("headful", True))
 
             if len(niche) < 3:
@@ -84,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
                 str(max_books),
                 "--min-bsr-books",
                 str(min_bsr_books),
+                "--zip-code",
+                zip_code,
                 "--submit",
             ]
             if headful:
