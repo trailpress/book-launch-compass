@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -383,7 +384,7 @@ def save_payload(niche: str, books: list[dict[str, Any]]) -> Path:
     return output_path
 
 
-def submit_to_kdpintel(niche: str, books: list[dict[str, Any]]) -> dict[str, Any]:
+def submit_to_kdpintel(niche: str, books: list[dict[str, Any]], max_attempts: int = 5) -> dict[str, Any]:
     env = {**load_env_file(ROOT / ".env"), **os.environ}
     supabase_url = env.get("VITE_SUPABASE_URL") or env.get("SUPABASE_URL")
     anon_key = env.get("VITE_SUPABASE_PUBLISHABLE_KEY") or env.get("VITE_SUPABASE_ANON_KEY")
@@ -391,20 +392,44 @@ def submit_to_kdpintel(niche: str, books: list[dict[str, Any]]) -> dict[str, Any
     if not supabase_url or not anon_key:
         raise RuntimeError("Mancano VITE_SUPABASE_URL o VITE_SUPABASE_PUBLISHABLE_KEY nel file .env.")
 
-    request = urllib.request.Request(
-        f"{supabase_url.rstrip('/')}/functions/v1/analyze-niche",
-        data=json.dumps({"niche": niche, "localBooks": books}).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {anon_key}",
-            "apikey": anon_key,
-        },
-        method="POST",
-    )
-
     ssl_context = ssl.create_default_context(cafile=certifi.where())
-    with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
-        return json.loads(response.read().decode("utf-8"))
+    last_error = ""
+
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(
+            f"{supabase_url.rstrip('/')}/functions/v1/analyze-niche",
+            data=json.dumps({"niche": niche, "localBooks": books}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {anon_key}",
+                "apikey": anon_key,
+            },
+            method="POST",
+        )
+
+        try:
+            print(f"Invio dati verificati a Supabase: tentativo {attempt}/{max_attempts}")
+            with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                if payload.get("success") is False:
+                    last_error = json.dumps(payload, ensure_ascii=False)
+                    raise RuntimeError(last_error)
+                return payload
+        except HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            last_error = f"HTTP {error.code}: {body[-1200:]}"
+        except URLError as error:
+            last_error = f"Errore rete/SSL: {error.reason}"
+        except Exception as error:
+            last_error = str(error)
+
+        if attempt < max_attempts:
+            wait_seconds = min(20, 2 * attempt)
+            print(f"Invio non riuscito: {last_error}")
+            print(f"Riprovo tra {wait_seconds}s senza perdere i dati raccolti.")
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Invio a Supabase non riuscito dopo {max_attempts} tentativi. Ultimo errore: {last_error}")
 
 
 def main() -> int:
