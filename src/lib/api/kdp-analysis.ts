@@ -481,9 +481,14 @@ async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boo
   const payload = await response.json().catch(() => null);
 
   if (!response.ok || payload?.ok === false) {
+    const detailText = typeof payload?.details === "string"
+      ? payload.details.split("\n").slice(-8).join("\n")
+      : "";
     return {
       started: false,
-      error: payload?.error || "Raccolta dati verificati non completata.",
+      error: [payload?.error || "Raccolta dati verificati non completata.", detailText]
+        .filter(Boolean)
+        .join("\n\n"),
     };
   }
 

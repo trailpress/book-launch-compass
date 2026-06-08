@@ -13,6 +13,7 @@ import json
 import os
 import random
 import re
+import ssl
 import sys
 import time
 import urllib.parse
@@ -22,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    import certifi
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 except ImportError:
-    print("Playwright non e' installato. Installa prima i requirements dello scraper.", file=sys.stderr)
+    print("Dipendenze scraper mancanti. Installa prima i requirements dello scraper.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -400,7 +402,8 @@ def submit_to_kdpintel(niche: str, books: list[dict[str, Any]]) -> dict[str, Any
         method="POST",
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

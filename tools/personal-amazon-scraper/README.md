@@ -16,6 +16,7 @@ cd "/Users/Pippo/Documents/Porting from Lovable/Book Launch Compass"
 python3 -m venv .venv-scraper
 source .venv-scraper/bin/activate
 pip install -r tools/personal-amazon-scraper/requirements.txt
+pip install certifi
 python -m playwright install chromium
 ```
 
