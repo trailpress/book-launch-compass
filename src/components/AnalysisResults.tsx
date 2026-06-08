@@ -66,6 +66,7 @@ export function AnalysisResults({
   const [loadingPhase, setLoadingPhase] = useState<string>("");
   const [slowAnalysisNotice, setSlowAnalysisNotice] = useState(false);
   const [compareIds, setCompareIds] = useState<string[] | null>(null);
+  const [autoRecoveryCount, setAutoRecoveryCount] = useState(0);
   const { toast } = useToast();
   const { playNotification, requestNotificationPermission } = useNotificationSound();
 
@@ -159,6 +160,20 @@ export function AnalysisResults({
       clearInterval(phaseInterval);
       clearTimeout(slowNoticeTimeout);
       const errorMessage = err instanceof Error ? err.message : 'Analysis failed';
+      const canAutoRecover =
+        autoRecoveryCount < 1 &&
+        /raccolta|raccoglitore|supabase|rete|ssl|timeout|502|504/i.test(errorMessage);
+
+      if (canAutoRecover) {
+        setAutoRecoveryCount((count) => count + 1);
+        setLoadingPhase("Recupero automatico: ritento la raccolta verificata...");
+        setSlowAnalysisNotice(false);
+        setTimeout(() => {
+          runAnalysis();
+        }, 4000);
+        return;
+      }
+
       setError(errorMessage);
       toast({
         title: "Analysis Failed",
@@ -170,7 +185,7 @@ export function AnalysisResults({
       setLoadingPhase("");
       setSlowAnalysisNotice(false);
     }
-  }, [analysisStartedAt, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
+  }, [analysisStartedAt, autoRecoveryCount, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
 
   // Track if analysis has been triggered for current niche to prevent duplicates
   const [analysisTriggered, setAnalysisTriggered] = useState(false);
@@ -178,6 +193,7 @@ export function AnalysisResults({
   useEffect(() => {
     // Reset trigger when niche changes
     setAnalysisTriggered(false);
+    setAutoRecoveryCount(0);
   }, [niche]);
 
   // Resume polling only (no new edge function call) when returning to page

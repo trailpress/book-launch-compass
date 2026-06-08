@@ -460,6 +460,7 @@ function getLocalScraperBaseUrl() {
 
 async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boolean; error?: string }> {
   const baseUrl = getLocalScraperBaseUrl();
+  const maxAttempts = 3;
 
   try {
     const healthResponse = await fetch(`${baseUrl}/health`, { method: "GET" });
@@ -473,26 +474,40 @@ async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boo
     };
   }
 
-  const response = await fetch(`${baseUrl}/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, zipCode: "10001", headful: true }),
-  });
-  const payload = await response.json().catch(() => null);
+  let lastError = "Raccolta dati verificati non completata.";
 
-  if (!response.ok || payload?.ok === false) {
-    const detailText = typeof payload?.details === "string"
-      ? payload.details.split("\n").slice(-8).join("\n")
-      : "";
-    return {
-      started: false,
-      error: [payload?.error || "Raccolta dati verificati non completata.", detailText]
-        .filter(Boolean)
-        .join("\n\n"),
-    };
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, zipCode: "10001", headful: true }),
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (response.ok && payload?.ok !== false) {
+        return { started: true };
+      }
+
+      const detailText = typeof payload?.details === "string"
+        ? payload.details.split("\n").slice(-10).join("\n")
+        : "";
+      lastError = [
+        payload?.error || `Raccolta dati verificati non completata (tentativo ${attempt}/${maxAttempts}).`,
+        detailText,
+      ].filter(Boolean).join("\n\n");
+    } catch (error) {
+      lastError = error instanceof Error
+        ? error.message
+        : "Raccoglitore locale non raggiungibile durante la raccolta.";
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 5000 * attempt));
+    }
   }
 
-  return { started: true };
+  return { started: false, error: lastError };
 }
 
 function calculateRiskScore({
