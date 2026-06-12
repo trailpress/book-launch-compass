@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+node_modules
+.venv-scraper
+.local/
+tools/personal-amazon-scraper/output/
+__pycache__/
+*.pyc
+dist
+dist-*
+dist-check
+dist-stale
+dist-check-stale
+dist-ssr
+*.local
+robots-stale.txt
+supabase/.temp/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
