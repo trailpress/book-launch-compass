@@ -312,15 +312,13 @@ export function EnhancedCompetitorCard({
         </div>
       </div>
 
-      {/* Historical Chart */}
+      {/* Historical Chart: current BSR snapshot first, real history as repeated scans accumulate */}
       {showChart &&
-        competitor.historicalData &&
-        competitor.historicalData.dates?.length > 0 &&
         competitor.bsr > 0 && (
           <div className="border-t border-border p-4 bg-muted/20">
             <HistoricalChart
               bookTitle={competitor.title}
-              data={competitor.historicalData}
+              data={competitor.historicalData || { dates: [], bsr: [], price: [], reviews: [], estimatedSales: [] }}
               currentBsr={competitor.bsr}
               currentPrice={competitor.price}
               currentReviews={competitor.reviews}
@@ -328,10 +326,10 @@ export function EnhancedCompetitorCard({
           </div>
         )}
       {showChart &&
-        (!competitor.historicalData?.dates?.length || !competitor.bsr) && (
+        !competitor.bsr && (
           <div className="border-t border-border p-4 bg-muted/20 text-center">
             <p className="text-muted-foreground text-sm">
-              Dati storici non disponibili - richiesto BSR per il grafico
+              BSR corrente non disponibile: serve almeno un BSR reale per iniziare il tracciamento.
             </p>
           </div>
         )}

@@ -294,6 +294,15 @@ type LocalScrapedBookInput = Partial<ScrapedBook> & {
   imageUrl?: string;
   priceCurrency?: string;
   publicationDate?: string;
+  relevanceScore?: number;
+  relevanceReason?: string;
+};
+
+type LocalSocialExcerptInput = Partial<SocialExcerpt> & {
+  rating?: number;
+  helpful?: number;
+  asin?: string;
+  bookTitle?: string;
 };
 
 interface PainPoint {
@@ -411,6 +420,7 @@ interface AnalysisResult {
     optimistic: { monthlySales: number; monthlyRevenue: number; monthlyProfit: number };
     avgPrice: number;
     avgProfitPerCopy: number;
+    dailyRoyaltyRange?: { min: number; max: number };
   };
   strategy: {
     suggestedTitle: string;
@@ -523,6 +533,83 @@ function parseFloatValue(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+const GENERIC_TITLE_WORDS = new Set([
+  'book',
+  'books',
+  'guide',
+  'guides',
+  'guidebook',
+  'guidebooks',
+  'travel',
+  'complete',
+  'ultimate',
+  'best',
+  'new',
+  'updated',
+  'edition',
+  'handbook',
+  'manual',
+  'introduction',
+  'workbook',
+  'checklist',
+  'planner',
+  'journal',
+  'logbook',
+  'and',
+  'the',
+  'for',
+  'with',
+  'from',
+  'your',
+]);
+
+function tokenizeForRelevance(value: string): string[] {
+  return (value.toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter((token) => token.length > 2)
+    .filter((token) => !GENERIC_TITLE_WORDS.has(token))
+    .filter((token) => !/^20\d{2}$/.test(token));
+}
+
+function titleRelevance(niche: string, title: string): { passes: boolean; score: number; reason: string } {
+  const required = tokenizeForRelevance(niche);
+  if (required.length === 0) {
+    return { passes: true, score: 1, reason: 'no specific niche tokens' };
+  }
+
+  const titleTokens = new Set(tokenizeForRelevance(title));
+  const matched = required.filter((token) => titleTokens.has(token));
+  const score = matched.length / required.length;
+  const passes = required.length <= 2
+    ? matched.length === required.length
+    : titleTokens.has(required[0]) && score >= 0.67;
+
+  return {
+    passes,
+    score,
+    reason: `matched ${matched.length}/${required.length}: ${matched.join(', ') || 'none'}`,
+  };
+}
+
+function textRelevance(niche: string, text: string, minRatio = 0.35): { passes: boolean; score: number; reason: string } {
+  const required = tokenizeForRelevance(niche);
+  if (required.length === 0) {
+    return { passes: true, score: 1, reason: 'no specific niche tokens' };
+  }
+
+  const lowered = text.toLowerCase();
+  const matched = required.filter((token) => lowered.includes(token));
+  const score = matched.length / required.length;
+  const passes = required.length <= 2
+    ? matched.length === required.length
+    : lowered.includes(required[0]) && score >= Math.max(minRatio, 0.66);
+
+  return {
+    passes,
+    score,
+    reason: `matched ${matched.length}/${required.length}: ${matched.join(', ') || 'none'}`,
+  };
+}
+
 function normalizeCoverUrl(rawUrl: unknown, asin: string): string {
   const fallback = asin
     ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SCLZZZZZZZ_SX220_.jpg`
@@ -544,7 +631,7 @@ function normalizeCoverUrl(rawUrl: unknown, asin: string): string {
   return normalized;
 }
 
-function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
+function normalizeLocalScrapedBooks(input: unknown, niche: string): ScrapedBook[] {
   if (!Array.isArray(input)) return [];
 
   const books: ScrapedBook[] = [];
@@ -556,8 +643,13 @@ function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
     const bsr = parseIntValue(book?.bsr);
     const priceCurrency = String(book?.priceCurrency || '').trim().toUpperCase();
     const price = priceCurrency && priceCurrency !== 'USD' ? 0 : parseFloatValue(book?.price);
+    const relevance = titleRelevance(niche, title);
 
     if (!asin || !title || title.length < 5 || bsr <= 0) continue;
+    if (!relevance.passes) {
+      console.log(`Skipping low-relevance local book for "${niche}": "${title}" (${relevance.reason})`);
+      continue;
+    }
     if (books.some((existing) => existing.asin === asin)) continue;
 
     books.push({
@@ -577,6 +669,110 @@ function normalizeLocalScrapedBooks(input: unknown): ScrapedBook[] {
   }
 
   return books;
+}
+
+function normalizeLocalAmazonReviews(input: unknown, niche: string): string[] {
+  if (!Array.isArray(input)) return [];
+
+  const seen = new Set<string>();
+  const reviews: string[] = [];
+
+  for (const item of input) {
+    const text = String(item || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 40) continue;
+    if (!textRelevance(niche, text, 0.25).passes) continue;
+
+    const key = text.slice(0, 140).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reviews.push(text.slice(0, 1000));
+  }
+
+  return reviews.slice(0, 30);
+}
+
+function normalizeLocalSocialSources(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+
+  return [...new Set(
+    input
+      .map((item) => String(item || '').trim())
+      .filter((url) => /^https?:\/\//i.test(url))
+  )].slice(0, 50);
+}
+
+function normalizeLocalSocialExcerpts(input: unknown, niche: string): SocialExcerpt[] {
+  if (!Array.isArray(input)) return [];
+
+  const allowedSources = new Set(['Amazon', 'Reddit', 'Quora', 'Forum', 'Blog', 'YouTube']);
+  const seen = new Set<string>();
+  const excerpts: SocialExcerpt[] = [];
+
+  for (const raw of input) {
+    const item = raw as LocalSocialExcerptInput;
+    const content = String(item?.content || '').replace(/\s+/g, ' ').trim();
+    const url = String(item?.url || '').trim();
+    const source = String(item?.source || '').trim();
+    if (content.length < 40 || !/^https?:\/\//i.test(url)) continue;
+    if (!allowedSources.has(source)) continue;
+    if (!textRelevance(niche, content, 0.25).passes) continue;
+
+    const key = `${source}:${content.slice(0, 120).toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    excerpts.push({
+      content: content.slice(0, 1000),
+      source: source as SocialExcerpt['source'],
+      url,
+      upvotes: parseIntValue(item?.upvotes),
+      comments: parseIntValue(item?.comments),
+      relevanceScore: Math.max(40, Math.min(100, parseIntValue(item?.relevanceScore) || 65)),
+      author: String(item?.author || '').slice(0, 80),
+      subreddit: String(item?.subreddit || '').slice(0, 80),
+      datePosted: String(item?.datePosted || '').slice(0, 80),
+    });
+  }
+
+  return excerpts.slice(0, 40);
+}
+
+function normalizeLocalGoogleTrends(input: unknown): GoogleTrendsData | null {
+  const item = input as Partial<GoogleTrendsData> | null;
+  if (!item || typeof item !== 'object') return null;
+
+  const data = Array.isArray(item.data)
+    ? item.data.map((value) => parseIntValue(value)).filter((value) => value >= 0).slice(-52)
+    : [];
+  const labels = Array.isArray(item.labels)
+    ? item.labels.map((value) => String(value || '').slice(0, 16)).slice(-52)
+    : [];
+  if (!data.length || !data.some((value) => value > 0) || labels.length !== data.length) return null;
+
+  const direction = item.direction === 'growing' || item.direction === 'declining' || item.direction === 'stable'
+    ? item.direction
+    : 'stable';
+  const seasonality = item.seasonality === 'high' || item.seasonality === 'moderate' || item.seasonality === 'low'
+    ? item.seasonality
+    : 'moderate';
+  const viability = item.viability === 'strong' || item.viability === 'moderate' || item.viability === 'weak'
+    ? item.viability
+    : 'moderate';
+
+  return {
+    direction,
+    seasonality,
+    viability,
+    data,
+    labels,
+    narrative: String(item.narrative || 'Google Trends US verificato localmente.').slice(0, 600),
+    relatedQueries: Array.isArray(item.relatedQueries)
+      ? item.relatedQueries.map((term) => String(term || '').slice(0, 80)).filter(Boolean).slice(0, 10)
+      : Array.isArray(item.relatedSearchTerms)
+        ? item.relatedSearchTerms.map((term) => String(term || '').slice(0, 80)).filter(Boolean).slice(0, 10)
+      : [],
+    trendsAnalysis: String(item.trendsAnalysis || '').slice(0, 800),
+  };
 }
 
 function normalizePublishDate(rawDate: unknown): string | null {
@@ -1194,24 +1390,21 @@ async function scrapeAmazonBooks(niche: string): Promise<{ books: ScrapedBook[];
       return false;
     }
     
+    const relevance = titleRelevance(niche, b.title);
+
     // If no keywords, accept all valid books
     if (relevantWords.length === 0) {
       console.log(`✓ ACCEPTED (no filter): "${b.title.slice(0, 50)}..."`);
       return true;
     }
-    
-    // If we have verified BSR, keep the competitor: it came from a targeted Amazon query.
-    if (b.bsr >= 100) {
-      console.log(`✓ ACCEPTED (verified BSR): "${b.title.slice(0, 50)}..."`);
+
+    if (relevance.passes) {
+      console.log(`✓ ACCEPTED (relevant ${relevance.reason}): "${b.title.slice(0, 50)}..."`);
       return true;
     }
 
-    // Check for partial match with ANY keyword
-    const hasMatch = relevantWords.some(w => titleLower.includes(w));
-    if (hasMatch) {
-      console.log(`✓ ACCEPTED: "${b.title.slice(0, 50)}..."`);
-    }
-    return hasMatch;
+    console.log(`✗ REJECTED low relevance (${relevance.reason}): "${b.title.slice(0, 70)}..."`);
+    return false;
   }).map(b => {
     // Reset suspicious BSR values
     if (b.bsr > 0 && b.bsr < 100) {
@@ -2136,17 +2329,38 @@ async function scrapeSearchVolume(niche: string): Promise<SearchVolumeData | nul
 
 function estimateDailySalesFromBSR(bsr: number): { min: number; max: number; avg: number } {
   if (!bsr || bsr <= 0) return { min: 0, max: 0, avg: 0 };
-  if (bsr <= 100) return { min: 100, max: 250, avg: 150 };
-  if (bsr <= 500) return { min: 50, max: 100, avg: 75 };
-  if (bsr <= 1000) return { min: 25, max: 50, avg: 35 };
-  if (bsr <= 5000) return { min: 10, max: 25, avg: 15 };
-  if (bsr <= 10000) return { min: 5, max: 10, avg: 7 };
-  if (bsr <= 20000) return { min: 3, max: 5, avg: 4 };
-  if (bsr <= 50000) return { min: 2, max: 3, avg: 2.5 };
-  if (bsr <= 100000) return { min: 1, max: 2, avg: 1.5 };
-  if (bsr <= 200000) return { min: 0.5, max: 1, avg: 0.7 };
-  if (bsr <= 500000) return { min: 0.2, max: 0.5, avg: 0.3 };
-  return { min: 0.05, max: 0.2, avg: 0.1 };
+  const anchors = [
+    { bsr: 100, avg: 150 },
+    { bsr: 500, avg: 75 },
+    { bsr: 1000, avg: 35 },
+    { bsr: 5000, avg: 15 },
+    { bsr: 10000, avg: 7 },
+    { bsr: 20000, avg: 4 },
+    { bsr: 50000, avg: 2.5 },
+    { bsr: 100000, avg: 1.5 },
+    { bsr: 200000, avg: 0.7 },
+    { bsr: 500000, avg: 0.3 },
+    { bsr: 1000000, avg: 0.1 },
+  ];
+
+  if (bsr <= anchors[0].bsr) {
+    const avg = Math.min(250, anchors[0].avg * Math.sqrt(anchors[0].bsr / Math.max(1, bsr)));
+    return { min: avg * 0.65, max: avg * 1.45, avg };
+  }
+
+  const upper = anchors.find((anchor) => bsr <= anchor.bsr) || anchors[anchors.length - 1];
+  const lowerIndex = Math.max(0, anchors.indexOf(upper) - 1);
+  const lower = anchors[lowerIndex];
+  const logRatio =
+    (Math.log(bsr) - Math.log(lower.bsr)) /
+    (Math.log(upper.bsr) - Math.log(lower.bsr));
+  const avg = lower.avg + (upper.avg - lower.avg) * Math.max(0, Math.min(1, logRatio));
+
+  return {
+    min: avg * 0.65,
+    max: avg * 1.45,
+    avg,
+  };
 }
 
 function estimateSalesFromBSR(bsr: number): number {
@@ -2193,10 +2407,17 @@ function calculateKdpRoyalty(
 ): number {
   if (!listPrice || listPrice <= 0 || !pageCount || pageCount <= 0) return 0;
 
-  const fixedCost = format === "hardcover" ? 6.8 : 0.85;
-  const perPageCost = isColor ? 0.07 : 0.012;
-  const printingCost = fixedCost + pageCount * perPageCost;
   const royaltyRate = 0.6;
+  let printingCost = 0;
+
+  if (format === "hardcover") {
+    printingCost = 6.8 + pageCount * 0.027;
+  } else if (!isColor && pageCount >= 24 && pageCount < 110) {
+    printingCost = 2.3;
+  } else {
+    printingCost = 1.0 + pageCount * (isColor ? 0.017 : 0.012);
+  }
+
   return Math.max(0, listPrice * royaltyRate - printingCost);
 }
 
@@ -2250,7 +2471,7 @@ function percentile(sortedValues: number[], pct: number): number {
 
 function buildProfitBenchmarks(competitors: CompetitorBook[]) {
   const comparable = competitors
-    .filter((book) => book.bsr > 0 && book.price > 0 && book.profitPerCopy > 0)
+    .filter((book) => book.bsr > 0 && book.price > 0 && book.profitPerCopy > 0 && (book.pages || 0) >= 24)
     .map((book) => ({
       monthlySales: book.estMonthlySales,
       monthlyRevenue: Math.round(book.estMonthlyRevenue),
@@ -2258,8 +2479,9 @@ function buildProfitBenchmarks(competitors: CompetitorBook[]) {
       dailyProfit: (book.estMonthlySales * book.profitPerCopy) / 30,
       profitPerCopy: book.profitPerCopy,
       price: book.price,
+      bsr: book.bsr,
     }))
-    .sort((a, b) => a.monthlyProfit - b.monthlyProfit);
+    .sort((a, b) => a.bsr - b.bsr);
 
   if (comparable.length === 0) {
     return {
@@ -2272,10 +2494,26 @@ function buildProfitBenchmarks(competitors: CompetitorBook[]) {
     };
   }
 
-  const pickScenario = (pct: number) => comparable[Math.min(comparable.length - 1, Math.max(0, Math.round((comparable.length - 1) * pct)))];
-  const conservative = pickScenario(0.2);
-  const expected = pickScenario(0.5);
-  const optimistic = pickScenario(0.8);
+  const topCount = Math.min(5, comparable.length);
+  const topBestSellers = comparable.slice(0, topCount);
+  const sumTop = topBestSellers.reduce((sum, item) => ({
+    monthlySales: sum.monthlySales + item.monthlySales,
+    monthlyRevenue: sum.monthlyRevenue + item.monthlyRevenue,
+    monthlyProfit: sum.monthlyProfit + item.monthlyProfit,
+    dailyProfit: sum.dailyProfit + item.dailyProfit,
+    profitPerCopy: sum.profitPerCopy + item.profitPerCopy,
+    price: sum.price + item.price,
+  }), { monthlySales: 0, monthlyRevenue: 0, monthlyProfit: 0, dailyProfit: 0, profitPerCopy: 0, price: 0 });
+
+  const averageTop = {
+    monthlySales: Math.round(sumTop.monthlySales / topCount),
+    monthlyRevenue: Math.round(sumTop.monthlyRevenue / topCount),
+    monthlyProfit: Math.round(sumTop.monthlyProfit / topCount),
+    dailyProfit: sumTop.dailyProfit / topCount,
+  };
+  const topByProfit = [...topBestSellers].sort((a, b) => a.dailyProfit - b.dailyProfit);
+  const conservative = topByProfit[0];
+  const optimistic = topByProfit[topByProfit.length - 1];
 
   return {
     conservative: {
@@ -2284,17 +2522,17 @@ function buildProfitBenchmarks(competitors: CompetitorBook[]) {
       monthlyProfit: conservative.monthlyProfit,
     },
     expected: {
-      monthlySales: expected.monthlySales,
-      monthlyRevenue: expected.monthlyRevenue,
-      monthlyProfit: expected.monthlyProfit,
+      monthlySales: averageTop.monthlySales,
+      monthlyRevenue: averageTop.monthlyRevenue,
+      monthlyProfit: averageTop.monthlyProfit,
     },
     optimistic: {
       monthlySales: optimistic.monthlySales,
       monthlyRevenue: optimistic.monthlyRevenue,
       monthlyProfit: optimistic.monthlyProfit,
     },
-    avgPrice: Math.round((comparable.reduce((sum, item) => sum + item.price, 0) / comparable.length) * 100) / 100,
-    avgProfitPerCopy: Math.round((comparable.reduce((sum, item) => sum + item.profitPerCopy, 0) / comparable.length) * 100) / 100,
+    avgPrice: Math.round((topBestSellers.reduce((sum, item) => sum + item.price, 0) / topCount) * 100) / 100,
+    avgProfitPerCopy: Math.round((topBestSellers.reduce((sum, item) => sum + item.profitPerCopy, 0) / topCount) * 100) / 100,
     dailyRoyaltyRange: {
       min: Math.round(conservative.dailyProfit * 100) / 100,
       max: Math.round(optimistic.dailyProfit * 100) / 100,
@@ -2355,6 +2593,14 @@ function seededNoise(seedStr: string): number {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
 
+function normalizeText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[“”"]/g, '')
+    .trim();
+}
+
 
 // Use AI to analyze and cluster pain points
 async function analyzeWithAI(
@@ -2395,15 +2641,11 @@ async function analyzeWithAI(
     // Use real price or 0 (UI will show "N/A")
     const price = book.price || 0;
     
-    // Calculate profit per copy with proper Amazon KDP royalty structure
-    // 60% royalty for books priced $9.99-$199.99, 35% for books under $9.99
-    // Print cost = $2.50 base + $0.012 per page (approximate for US)
-    let profitPerCopy = 0;
-    if (price > 0 && book.pages && book.pages > 0) {
-      const royalty = price >= 9.99 ? 0.60 : 0.35;
-      const printCost = 2.50 + book.pages * 0.012;
-      profitPerCopy = Math.max(0, (price * royalty) - printCost);
-    }
+    const format = book.format || 'Paperback';
+    const bookFormat: "paperback" | "hardcover" = format.toLowerCase().includes('hard') ? 'hardcover' : 'paperback';
+    const profitPerCopy = price > 0 && book.pages && book.pages > 0
+      ? calculateKdpRoyalty(price, book.pages, bookFormat, isLikelyColorBook(book.title))
+      : 0;
     
     // Rank is now based on BSR (index 0 = best seller with lowest BSR)
     return {
@@ -2419,7 +2661,7 @@ async function analyzeWithAI(
       estMonthlySales, // Only calculated from REAL BSR
       estMonthlyRevenue: hasRealBsr && price > 0 ? Math.round(estMonthlySales * price) : 0,
       profitPerCopy: Math.round(profitPerCopy * 100) / 100,
-      format: book.format || 'Unknown',
+      format,
       pages: book.pages || 0,
       trend: hasRealBsr ? (bsr < 50000 ? 'up' : bsr < 100000 ? 'stable' : 'down') : 'stable' as "up" | "stable" | "down",
       publishDate: normalizePublishDate(book.publishDate) || '',
@@ -2437,7 +2679,8 @@ async function analyzeWithAI(
   
   // Calculate profitability metrics from REAL data
   const booksWithValidBsr = competitors.filter(c => c.bsr > 0 && c.bsr < 100000);
-  const booksWithGoodProfit = competitors.filter(c => c.profitPerCopy >= 5);
+  const profitEligibleCompetitors = competitors.filter((c) => (c.pages || 0) >= 24 && c.price > 0 && c.bsr > 0);
+  const booksWithGoodProfit = profitEligibleCompetitors.filter(c => c.profitPerCopy >= 5);
   const selfPublisherIndicators = competitors.filter(c => 
     c.author && (
       c.author.toLowerCase().includes('independently published') ||
@@ -2452,11 +2695,10 @@ async function analyzeWithAI(
   console.log(`- Likely self-publishers: ${selfPublisherIndicators.length}`);
 
   const createDeterministicAnalysis = (reason: string): AnalysisResult => {
-    const validPrices = competitors.map((c) => c.price).filter((value) => value > 0);
-    const validPages = competitors.map((c) => c.pages).filter((value) => value > 0);
-    const validProfits = competitors.map((c) => c.profitPerCopy).filter((value) => value > 0);
-    const totalEstimatedSales = competitors.reduce((sum, c) => sum + (c.estMonthlySales || 0), 0);
-    const totalEstimatedRevenue = competitors.reduce((sum, c) => sum + (c.estMonthlyRevenue || 0), 0);
+    const profitBase = profitEligibleCompetitors.length ? profitEligibleCompetitors : competitors;
+    const validPrices = profitBase.map((c) => c.price).filter((value) => value > 0);
+    const validPages = profitBase.map((c) => c.pages).filter((value) => value > 0);
+    const validProfits = profitBase.map((c) => c.profitPerCopy).filter((value) => value > 0);
     const avgPrice = validPrices.length
       ? Math.round((validPrices.reduce((sum, value) => sum + value, 0) / validPrices.length) * 100) / 100
       : 0;
@@ -2471,6 +2713,17 @@ async function analyzeWithAI(
     const strongBsrCount = competitors.filter((c) => c.bsr > 0 && c.bsr < 50000).length;
     const reviewHeavyCount = competitors.filter((c) => c.reviews > 500).length;
     const sourceCount = socialSources.length;
+    const sortedByBsr = competitors
+      .filter((c) => c.bsr > 0)
+      .sort((a, b) => a.bsr - b.bsr);
+    const topSeller = sortedByBsr[0];
+    const medianSeller = sortedByBsr[Math.floor(sortedByBsr.length / 2)];
+    const priceRange = validPrices.length
+      ? `$${Math.min(...validPrices).toFixed(2)}-$${Math.max(...validPrices).toFixed(2)}`
+      : 'prezzo non disponibile';
+    const reviewRange = competitors.length
+      ? `${Math.min(...competitors.map((c) => c.reviews || 0)).toLocaleString()}-${Math.max(...competitors.map((c) => c.reviews || 0)).toLocaleString()} recensioni`
+      : 'recensioni non disponibili';
 
     const profitabilityScore = Math.max(15, Math.min(95, Math.round(
       booksWithValidBsr.length * 18 +
@@ -2510,9 +2763,23 @@ async function analyzeWithAI(
     const painPoints = excerptPainPoints.length
       ? excerptPainPoints
       : amazonReviews.slice(0, 5).map((review) => review.slice(0, 180)).filter(Boolean);
+    const dataBackedObservations = [
+      topSeller
+        ? `Competitor leader verificato: "${topSeller.title.slice(0, 90)}" con BSR #${topSeller.bsr.toLocaleString()}, prezzo ${topSeller.price ? `$${topSeller.price.toFixed(2)}` : 'non disponibile'} e ${(topSeller.reviews || 0).toLocaleString()} recensioni.`
+        : '',
+      medianSeller
+        ? `Benchmark mediano: BSR #${medianSeller.bsr.toLocaleString()} su "${medianSeller.title.slice(0, 80)}"; utile come scenario realistico, non come promessa di risultato.`
+        : '',
+      `Pertinenza competitor: ${competitors.length} libri filtrati sulla keyword "${niche}", ${booksWithValidBsr.length} con BSR sotto 100K.`,
+      `Barriera recensioni: range osservato ${reviewRange}; se i top hanno molte recensioni, serve un angolo editoriale molto piu specifico.`,
+      `Fascia prezzo reale: ${priceRange}; margine medio stimato $${avgProfitPerCopy.toFixed(2)} per copia sui libri con dati sufficienti.`,
+      validPages.length
+        ? `Formato osservato: ${minPages}-${maxPages} pagine, media ${avgPages}; evita di competere con un libro troppo leggero se i bestseller sono completi.`
+        : '',
+    ].filter(Boolean);
     const fallbackPainPoints = painPoints.length
       ? painPoints
-      : [`Validare meglio il bisogno specifico per "${niche}" prima di pubblicare.`];
+      : dataBackedObservations;
 
     return {
       scores: {
@@ -2524,25 +2791,27 @@ async function analyzeWithAI(
       verdict: {
         type: verdictType,
         confidence: Math.max(35, Math.min(85, Math.round((profitabilityScore + opportunityScore + (100 - riskScore)) / 3))),
-        summary: `Analisi completata con modello rapido per evitare timeout in fase AI. I dati reali mostrano ${booksWithValidBsr.length} competitor con BSR sotto 100K e un profitto medio stimato di $${avgProfitPerCopy.toFixed(2)} per copia.`,
+        summary: `Analisi basata sui competitor Amazon verificati e filtrati per pertinenza. Nel set utile ci sono ${competitors.length} libri, ${booksWithValidBsr.length} con BSR sotto 100K; il margine medio stimato e $${avgProfitPerCopy.toFixed(2)} per copia sui libri con prezzo e pagine disponibili.`,
         insights: [
-          `${booksWithValidBsr.length} libri mostrano segnali di vendita reale tramite BSR sotto 100K.`,
-          `${booksWithGoodProfit.length} competitor raggiungono o superano circa $5 di profitto per copia.`,
-          `${selfPublisherIndicators.length} competitor sembrano compatibili con editori indipendenti.`,
-          `Fallback usato: ${reason}. I risultati sono basati sui dati raccolti, con meno interpretazione narrativa AI.`,
+          topSeller
+            ? `Top seller rilevante: "${topSeller.title.slice(0, 70)}" con BSR #${topSeller.bsr.toLocaleString()} e ${(topSeller.reviews || 0).toLocaleString()} recensioni.`
+            : `Nessun top seller con BSR verificato dopo il filtro di pertinenza.`,
+          `${booksWithValidBsr.length}/${competitors.length} competitor filtrati hanno BSR sotto 100K: questo misura domanda reale, non semplice curiosita.`,
+          `${booksWithGoodProfit.length}/${competitors.length} competitor raggiungono circa $5+ di profitto per copia con i dati disponibili.`,
+          `Fascia prezzo osservata: ${priceRange}; barriera recensioni: ${reviewRange}.`,
         ],
       },
       competitors,
       opportunities: {
-        gaps: ['Approfondire un angolo editoriale piu specifico rispetto ai competitor principali.'],
+        gaps: dataBackedObservations.slice(0, 3),
         weaknesses: reviewHeavyCount > 0
-          ? ['Alcuni competitor sono molto recensiti: serve differenziazione chiara.']
-          : ['La concorrenza non appare dominata da grandi volumi di recensioni.'],
-        underserved: ['Segmenti specifici emersi da recensioni e discussioni meritano una validazione manuale.'],
+          ? [`Almeno ${reviewHeavyCount} competitor superano 500 recensioni: l'ingresso richiede promessa e copertina molto differenziate.`]
+          : ['La concorrenza filtrata non appare dominata da grandi volumi di recensioni.'],
+        underserved: painPoints.length ? painPoints.slice(0, 3) : dataBackedObservations.slice(2, 5),
         opportunities: [
           avgProfitPerCopy >= 5
-            ? 'Prezzo e formato possono sostenere margini interessanti.'
-            : 'Ottimizzare prezzo, formato e numero pagine per migliorare il margine.',
+            ? `Prezzo e formato possono sostenere margini interessanti: media stimata $${avgProfitPerCopy.toFixed(2)} per copia.`
+            : `Margine medio stimato $${avgProfitPerCopy.toFixed(2)}: prima di pubblicare va progettato prezzo/formato per non comprimere il profitto.`,
         ],
       },
       patterns: {
@@ -2569,25 +2838,7 @@ async function analyzeWithAI(
         keyPatterns: ['Nessun pattern temporale generato senza dati reali.'],
         forecast: 'Previsione non disponibile senza dati storici verificati.',
       },
-      profit: {
-        conservative: {
-          monthlySales: Math.round(totalEstimatedSales * 0.1),
-          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.1),
-          monthlyProfit: Math.round(totalEstimatedSales * 0.1 * avgProfitPerCopy),
-        },
-        expected: {
-          monthlySales: Math.round(totalEstimatedSales * 0.25),
-          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.25),
-          monthlyProfit: Math.round(totalEstimatedSales * 0.25 * avgProfitPerCopy),
-        },
-        optimistic: {
-          monthlySales: Math.round(totalEstimatedSales * 0.5),
-          monthlyRevenue: Math.round(totalEstimatedRevenue * 0.5),
-          monthlyProfit: Math.round(totalEstimatedSales * 0.5 * avgProfitPerCopy),
-        },
-        avgPrice,
-        avgProfitPerCopy,
-      },
+      profit: buildProfitBenchmarks(profitEligibleCompetitors),
       strategy: {
         suggestedTitle: `${niche.replace(/\b\w/g, (char) => char.toUpperCase())} Workbook`,
         suggestedSubtitle: 'A Practical Step-by-Step Guide for Clear Results',
@@ -2985,9 +3236,54 @@ Return ONLY the JSON object.`;
       // Use ONLY REAL scraped competitors - no AI-generated fallbacks
       analysis.competitors = competitors;
       console.log('Using', competitors.length, 'REAL scraped competitors');
+
+      // Profit must be deterministic and anchored to real competitor rows only.
+      analysis.profit = buildProfitBenchmarks(profitEligibleCompetitors);
       
       // Merge social excerpts
       analysis.socialExcerpts = allExcerpts.slice(0, 25);
+
+      const sourceTexts = [
+        ...amazonReviews,
+        ...allExcerpts.map((excerpt) => excerpt.content),
+      ].map((text) => normalizeText(String(text || ''))).filter(Boolean);
+      const hasSourceText = sourceTexts.length > 0;
+      const quoteIsVerifiable = (quote: unknown) => {
+        const normalizedQuote = normalizeText(String(quote || ''));
+        if (normalizedQuote.length < 24) return false;
+        return sourceTexts.some((source) => source.includes(normalizedQuote) || normalizedQuote.includes(source.slice(0, 120)));
+      };
+
+      if (amazonReviews.length < 2) {
+        analysis.reviewPatterns = null;
+      } else if (analysis.reviewPatterns) {
+        const sanitizePatterns = (patterns: any[]) => (Array.isArray(patterns) ? patterns : [])
+          .map((pattern) => ({
+            ...pattern,
+            sampleQuotes: (Array.isArray(pattern?.sampleQuotes) ? pattern.sampleQuotes : []).filter(quoteIsVerifiable),
+          }))
+          .filter((pattern) => pattern.sampleQuotes.length > 0);
+        analysis.reviewPatterns.positivePatterns = sanitizePatterns(analysis.reviewPatterns.positivePatterns);
+        analysis.reviewPatterns.negativePatterns = sanitizePatterns(analysis.reviewPatterns.negativePatterns);
+        analysis.reviewPatterns.totalReviewsAnalyzed = amazonReviews.length;
+        if (!analysis.reviewPatterns.positivePatterns.length && !analysis.reviewPatterns.negativePatterns.length) {
+          analysis.reviewPatterns = null;
+        }
+      }
+
+      if (!hasSourceText) {
+        analysis.painPointsFromWeb = [];
+        analysis.clusteredPainPoints = [];
+        analysis.totalMentions = 0;
+      } else if (Array.isArray(analysis.clusteredPainPoints)) {
+        analysis.clusteredPainPoints = analysis.clusteredPainPoints
+          .map((cluster: ClusteredPainPoint) => ({
+            ...cluster,
+            sampleQuotes: (Array.isArray(cluster.sampleQuotes) ? cluster.sampleQuotes : []).filter(quoteIsVerifiable),
+          }))
+          .filter((cluster: ClusteredPainPoint) => cluster.sampleQuotes.length > 0);
+        analysis.totalMentions = analysis.clusteredPainPoints.reduce((sum: number, cluster: ClusteredPainPoint) => sum + (cluster.count || 0), 0);
+      }
       
       // Ensure clusteredPainPoints exists
       if (!analysis.clusteredPainPoints) {
@@ -3098,15 +3394,31 @@ async function saveAnalysisToDatabase(niche: string, analysis: AnalysisResult, s
         continue;
       }
 
-      if (comp.historicalData && bookRow) {
-        const historyRecords = comp.historicalData.dates.map((date: string, i: number) => ({
-          book_id: bookRow.id,
-          recorded_at: date.length === 10 ? new Date(date).toISOString() : new Date(date + '-15').toISOString(),
-          bsr: comp.historicalData.bsr[i],
-          price: comp.historicalData.price[i],
-          reviews: comp.historicalData.reviews[i],
-          estimated_sales: comp.historicalData.estimatedSales[i],
-        }));
+      if (bookRow) {
+        const existingHistoryDates = comp.historicalData?.dates || [];
+        const historyRecords = existingHistoryDates.length > 0
+          ? existingHistoryDates.map((date: string, i: number) => ({
+              book_id: bookRow.id,
+              recorded_at: date.length === 10 ? new Date(date).toISOString() : new Date(date + '-15').toISOString(),
+              bsr: comp.historicalData.bsr[i],
+              price: comp.historicalData.price[i],
+              reviews: comp.historicalData.reviews[i],
+              estimated_sales: comp.historicalData.estimatedSales[i],
+            }))
+          : comp.bsr > 0
+            ? [{
+                book_id: bookRow.id,
+                recorded_at: new Date().toISOString(),
+                bsr: comp.bsr,
+                price: comp.price || 0,
+                reviews: comp.reviews || 0,
+                estimated_sales: comp.estMonthlySales || 0,
+              }]
+            : [];
+
+        if (historyRecords.length === 0) {
+          continue;
+        }
 
         const { error: historyError } = await supabase
           .from('competitor_history')
@@ -3127,7 +3439,16 @@ async function saveAnalysisToDatabase(niche: string, analysis: AnalysisResult, s
 }
 
 // Background analysis function with improved error handling
-async function runAnalysisInBackground(niche: string, jobId?: string | null, localBooksInput?: unknown) {
+async function runAnalysisInBackground(
+  niche: string,
+  jobId?: string | null,
+  localBooksInput?: unknown,
+  localAmazonReviewsInput?: unknown,
+  localSocialContentInput?: unknown,
+  localSocialExcerptsInput?: unknown,
+  localSocialSourcesInput?: unknown,
+  localGoogleTrendsInput?: unknown,
+) {
   const startTime = Date.now();
   
   try {
@@ -3136,7 +3457,7 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null, loc
     // Step 1: Scrape REAL Amazon book data with error handling
     console.log('Step 1: Scraping REAL Amazon data...');
     await updateAnalysisJob(jobId, { status: 'running', error_message: 'scraping_amazon' });
-    let realBooks: ScrapedBook[] = normalizeLocalScrapedBooks(localBooksInput);
+    let realBooks: ScrapedBook[] = normalizeLocalScrapedBooks(localBooksInput, niche);
     let amazonSources: string[] = realBooks.length
       ? [`local-personal-scraper:${niche}`]
       : [];
@@ -3187,14 +3508,39 @@ async function runAnalysisInBackground(niche: string, jobId?: string | null, loc
     let youtubeSources: string[] = [];
     let googleTrendsData: GoogleTrendsData | null = null;
     let searchVolumeData: SearchVolumeData | null = null;
+
+    const localAmazonReviews = normalizeLocalAmazonReviews(localAmazonReviewsInput, niche);
+    const localSocialContent = String(localSocialContentInput || '').trim().slice(0, 16000);
+    const localSocialExcerpts = normalizeLocalSocialExcerpts(localSocialExcerptsInput, niche);
+    const localSocialSources = normalizeLocalSocialSources(localSocialSourcesInput);
+    const localGoogleTrends = normalizeLocalGoogleTrends(localGoogleTrendsInput);
     
+    if (localAmazonReviews.length || localSocialExcerpts.length || localSocialContent) {
+      console.log(
+        'Using local verified qualitative data:',
+        localAmazonReviews.length,
+        'Amazon reviews,',
+        localSocialExcerpts.length,
+        'social excerpts',
+      );
+      amazonReviews = localAmazonReviews;
+      amazonExcerpts = localSocialExcerpts.filter((excerpt) => excerpt.source === 'Amazon');
+      rawContent = localSocialContent;
+      socialExcerpts = localSocialExcerpts.filter((excerpt) => excerpt.source !== 'Amazon');
+      reviewSources = localSocialSources.filter((url) => url.includes('amazon.com'));
+      socialSources = localSocialSources.filter((url) => !url.includes('amazon.com'));
+    }
+    if (localGoogleTrends) {
+      console.log('Using local verified Google Trends data');
+    }
+
     try {
       const [reviewResult, socialResult, youtubeResult, trendsResult, volumeResult] = await withStepTimeout(
         Promise.allSettled([
-          scrapeAmazonReviews(niche, bookAsins),
-          scrapeRealSocialContent(niche),
+          amazonReviews.length ? Promise.resolve({ reviews: amazonReviews, sources: reviewSources, excerpts: amazonExcerpts }) : scrapeAmazonReviews(niche, bookAsins),
+          socialExcerpts.length || rawContent ? Promise.resolve({ painPoints: [], rawContent, sources: socialSources, socialExcerpts }) : scrapeRealSocialContent(niche),
           scrapeYouTubeComments(niche),
-          scrapeGoogleTrends(niche),
+          localGoogleTrends ? Promise.resolve(localGoogleTrends) : scrapeGoogleTrends(niche),
           scrapeSearchVolume(niche)
         ]),
         PARALLEL_SOURCES_TIMEOUT_MS,
@@ -3439,7 +3785,17 @@ Deno.serve(async (req) => {
     }
     
     const requestBody = await req.json();
-    const { niche: rawNiche, debugAmazon, localBooks, books } = requestBody;
+    const {
+      niche: rawNiche,
+      debugAmazon,
+      localBooks,
+      books,
+      localAmazonReviews,
+      localSocialContent,
+      localSocialExcerpts,
+      localSocialSources,
+      localGoogleTrends,
+    } = requestBody;
     
     // Input validation
     if (!rawNiche || typeof rawNiche !== 'string') {
@@ -3510,7 +3866,18 @@ Deno.serve(async (req) => {
 
     // Start background analysis - this continues even after response is sent
     // @ts-expect-error - EdgeRuntime is available in Supabase Edge Functions
-    EdgeRuntime.waitUntil(runAnalysisInBackground(niche, job.id, localBooks || books));
+    EdgeRuntime.waitUntil(
+      runAnalysisInBackground(
+        niche,
+        job.id,
+        localBooks || books,
+        localAmazonReviews,
+        localSocialContent,
+        localSocialExcerpts,
+        localSocialSources,
+        localGoogleTrends,
+      ),
+    );
 
     // Return immediately - client will poll database for results
     return new Response(

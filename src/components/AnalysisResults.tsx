@@ -11,6 +11,7 @@ import { PatternDetection } from "./PatternDetection";
 import { PainDesirePieChart } from "./PainDesirePieChart";
 import { SourcesCard } from "./SourcesCard";
 import { SocialInsightsCard } from "./SocialInsightsCard";
+import { RedditPatternClusters } from "./RedditPatternClusters";
 import { TitleGenerator } from "./TitleGenerator";
 import { ReviewPatternSummary } from "./ReviewPatternSummary";
 import { SavedAnalyses } from "./SavedAnalyses";
@@ -70,6 +71,15 @@ export function AnalysisResults({
   const { toast } = useToast();
   const { playNotification, requestNotificationPermission } = useNotificationSound();
 
+  const normalizedNiche = niche.trim().toLowerCase();
+  const isResultForCurrentNiche = useCallback(
+    (candidate?: AnalysisData | null) => {
+      const candidateNiche = (candidate?.niche || "").trim().toLowerCase();
+      return Boolean(candidateNiche) && candidateNiche === normalizedNiche;
+    },
+    [normalizedNiche],
+  );
+
   // Request browser notification permission on mount
   useEffect(() => {
     requestNotificationPermission();
@@ -77,11 +87,21 @@ export function AnalysisResults({
 
   // Update data when initialData changes (for loaded analyses)
   useEffect(() => {
-    if (initialData) {
+    if (initialData && isResultForCurrentNiche(initialData)) {
       setData(initialData);
       setError(null);
+      return;
     }
-  }, [initialData]);
+
+    if (!initialData) {
+      setData(null);
+      setError(null);
+    }
+  }, [initialData, isResultForCurrentNiche]);
+
+  useEffect(() => {
+    setData((current) => (current && !isResultForCurrentNiche(current) ? null : current));
+  }, [isResultForCurrentNiche, niche]);
 
   const runAnalysis = useCallback(async () => {
     setError(null);
@@ -128,6 +148,10 @@ export function AnalysisResults({
       
       if (!result.success || !result.data) {
         throw new Error(result.error || 'Analysis failed');
+      }
+
+      if (!isResultForCurrentNiche(result.data)) {
+        throw new Error(`Risultato scartato: la risposta era per "${result.data.niche || "un'altra nicchia"}", non per "${niche}".`);
       }
       
       setData(result.data);
@@ -185,7 +209,7 @@ export function AnalysisResults({
       setLoadingPhase("");
       setSlowAnalysisNotice(false);
     }
-  }, [analysisStartedAt, autoRecoveryCount, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
+  }, [analysisStartedAt, autoRecoveryCount, isResultForCurrentNiche, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
 
   // Track if analysis has been triggered for current niche to prevent duplicates
   const [analysisTriggered, setAnalysisTriggered] = useState(false);
@@ -211,6 +235,12 @@ export function AnalysisResults({
       if (!result.success || !result.data) {
         // If polling finds nothing, the background task may have failed — re-run
         console.log('Resume polling found nothing, starting fresh analysis');
+        runAnalysis();
+        return;
+      }
+
+      if (!isResultForCurrentNiche(result.data)) {
+        console.warn("Resume returned analysis for a different niche, starting fresh analysis", result.data.niche, niche);
         runAnalysis();
         return;
       }
@@ -240,7 +270,7 @@ export function AnalysisResults({
       onLoadingChange(false);
       setLoadingPhase("");
     }
-  }, [analysisStartedAt, niche, onAnalysisComplete, onLoadingChange, playNotification, toast, runAnalysis]);
+  }, [analysisStartedAt, isResultForCurrentNiche, niche, onAnalysisComplete, onLoadingChange, playNotification, toast, runAnalysis]);
 
   useEffect(() => {
     // Only run analysis if no initialData, isLoading, and not already triggered
@@ -311,25 +341,75 @@ export function AnalysisResults({
     return null;
   }
 
+  const qualitativeCount = data.socialExcerpts?.length || 0;
+  const qualitativeSources = new Set((data.socialExcerpts || []).map((excerpt) => excerpt.source));
+  const amazonTextReviewCount = (data.socialExcerpts || []).filter((excerpt) => excerpt.source === "Amazon").length;
+  const nonAmazonQualitativeSources = new Set(
+    (data.socialExcerpts || [])
+      .filter((excerpt) => excerpt.source !== "Amazon")
+      .map((excerpt) => excerpt.source)
+  );
+  const hasTrendSeries = Array.isArray(data.trends?.data) && data.trends.data.some((value) => Number(value) > 0);
+  const hasThinQualitativeData = qualitativeCount < 6 || qualitativeSources.size < 2;
+  const hasEnoughAmazonReviewEvidence = amazonTextReviewCount >= 6;
+  const hasEnoughExternalEvidence = nonAmazonQualitativeSources.size >= 2;
+  const isDecisionGrade =
+    hasEnoughAmazonReviewEvidence &&
+    hasEnoughExternalEvidence;
+  const hasTrendGap = !hasTrendSeries;
+
   return (
     <div className="container py-16 space-y-8" id="analysis-results">
       {/* Section Header with Export */}
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 mb-12">
         <div className="text-center md:text-left flex-1">
           <p className="text-sm uppercase tracking-widest text-primary mb-2">
-            Analisi Completa • {data.sources?.length || 0} Fonti Reali
+            {hasThinQualitativeData ? "Analisi Amazon verificata" : "Analisi con fonti qualitative"} • {data.sources?.length || 0} fonti
           </p>
           <h2 className="text-3xl md:text-4xl font-bold mb-4">
             Intelligence di Mercato per "{niche}"
           </h2>
           <p className="text-muted-foreground max-w-2xl">
-            Insights basati su dati reali da Reddit, Quora, forum e analisi AI.
+            Dati Amazon verificati con fonti qualitative solo quando sono state realmente raccolte.
           </p>
         </div>
         
         {/* Export PDF Button */}
         <ExportPDF data={data} niche={niche} />
       </div>
+
+      {hasThinQualitativeData && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+          <p className="font-semibold text-amber-200">Copertura qualitativa limitata</p>
+          <p className="mt-1 text-muted-foreground">
+            Sono stati trovati {qualitativeCount} estratti verificabili da {qualitativeSources.size} canali.
+            Le sezioni su pain point, Reddit, Quora, forum e recensioni devono quindi pesare poco:
+            l'analisi è soprattutto basata su competitor Amazon, BSR, prezzo e pagine.
+          </p>
+        </div>
+      )}
+
+      {!isDecisionGrade && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-100">
+          <p className="font-semibold text-red-200">Analisi non sufficiente per una decisione</p>
+          <p className="mt-1 text-muted-foreground">
+            Copertura attuale: {amazonTextReviewCount} review Amazon testuali, {nonAmazonQualitativeSources.size} canali esterni
+            verificabili. Il verdict, i pain point e la stima di mercato non vanno trattati come affidabili finche mancano
+            almeno 6 review Amazon testuali e 2 canali esterni verificabili.
+          </p>
+        </div>
+      )}
+
+      {isDecisionGrade && hasTrendGap && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+          <p className="font-semibold text-amber-200">Trend non verificato</p>
+          <p className="mt-1 text-muted-foreground">
+            La copertura qualitativa è utilizzabile ({amazonTextReviewCount} review Amazon e {nonAmazonQualitativeSources.size} canali esterni),
+            ma Google Trends non ha restituito una serie verificabile. Tratta stagionalità e volume di ricerca come dati mancanti,
+            non come segnali negativi.
+          </p>
+        </div>
+      )}
 
       {/* Key Insights Bar - NEW */}
       {data.keyInsights && data.keyInsights.length > 0 && (
@@ -419,11 +499,14 @@ export function AnalysisResults({
 
       {/* Social Insights - Real Community Discussions */}
       {data.socialExcerpts && data.socialExcerpts.length > 0 && (
-        <SocialInsightsCard excerpts={data.socialExcerpts} />
+        <>
+          <RedditPatternClusters excerpts={data.socialExcerpts} />
+          <SocialInsightsCard excerpts={data.socialExcerpts} />
+        </>
       )}
 
       {/* Review Pattern Summary - Positive & Negative Trends */}
-      {data.reviewPatterns && (
+      {data.reviewPatterns && amazonTextReviewCount >= 2 && (
         <ReviewPatternSummary patterns={data.reviewPatterns} />
       )}
 

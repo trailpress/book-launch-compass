@@ -240,6 +240,16 @@ interface AnalysisJobStatus {
   updated_at: string;
 }
 
+interface LocalAnalysisJobStatus {
+  id: string;
+  status: "running" | "completed" | "failed" | string;
+  phase?: string;
+  error?: string | null;
+  logs?: string;
+  updatedAt?: number;
+  supabase?: unknown;
+}
+
 export interface SavedAnalysisCacheEntry {
   id: string;
   niche_keyword: string;
@@ -458,7 +468,19 @@ function getLocalScraperBaseUrl() {
   return `http://${scraperHost}:${LOCAL_SCRAPER_PORT}`;
 }
 
-async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boolean; error?: string }> {
+async function getLocalAnalysisJobStatus(jobId: string): Promise<LocalAnalysisJobStatus | null> {
+  try {
+    const response = await fetch(`${getLocalScraperBaseUrl()}/status?jobId=${encodeURIComponent(jobId)}`, {
+      method: "GET",
+    });
+    const payload = await response.json().catch(() => null);
+    return response.ok && payload?.ok ? payload.job as LocalAnalysisJobStatus : null;
+  } catch {
+    return null;
+  }
+}
+
+async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boolean; localJobId?: string; error?: string }> {
   const baseUrl = getLocalScraperBaseUrl();
   const maxAttempts = 3;
 
@@ -481,12 +503,12 @@ async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boo
       const response = await fetch(`${baseUrl}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, zipCode: "10001", headful: true }),
+        body: JSON.stringify({ niche, maxBooks: 8, minBsrBooks: 3, maxReviewsPerBook: 8, zipCode: "10001", headful: true }),
       });
       const payload = await response.json().catch(() => null);
 
       if (response.ok && payload?.ok !== false) {
-        return { started: true };
+        return { started: true, localJobId: typeof payload?.jobId === "string" ? payload.jobId : undefined };
       }
 
       const detailText = typeof payload?.details === "string"
@@ -532,7 +554,7 @@ export function setPollingStartTime(startedAt?: number | null) {
 }
 
 // Poll for analysis completion by checking database
-export async function pollForAnalysis(niche: string, maxAttempts: number = 180): Promise<AnalysisResponse> {
+export async function pollForAnalysis(niche: string, maxAttempts: number = 180, localJobId?: string): Promise<AnalysisResponse> {
   const startTime = Date.now();
   const staleJobAfterMs = 3 * 60 * 1000;
   const staleJobMinimumElapsedMs = 4 * 60 * 1000;
@@ -583,6 +605,20 @@ export async function pollForAnalysis(niche: string, maxAttempts: number = 180):
       }
     } catch (jobError) {
       console.warn("analysis job status unavailable:", jobError);
+    }
+
+    if (localJobId) {
+      const localJob = await getLocalAnalysisJobStatus(localJobId);
+
+      if (localJob?.status === "failed") {
+        return {
+          success: false,
+          error: [
+            localJob.error || `Raccolta locale interrotta durante ${localJob.phase || "fase sconosciuta"}.`,
+            localJob.logs ? localJob.logs.split("\n").slice(-8).join("\n") : "",
+          ].filter(Boolean).join("\n\n"),
+        };
+      }
     }
 
     try {
@@ -675,7 +711,7 @@ export async function analyzeNiche(niche: string): Promise<AnalysisResponse> {
     }
 
     console.log('Verified local collection started, polling for Supabase result...');
-    return await pollForAnalysis(niche);
+    return await pollForAnalysis(niche, 180, localStart.localJobId);
   } catch (err) {
     console.error('Error calling analyze-niche:', err);
     return {
@@ -750,22 +786,71 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
       bsr: c.current_bsr
     })));
 
-    // Fetch historical data for each competitor
-    const competitors: CompetitorBook[] = [];
-    for (const comp of competitorRows || []) {
-      const { data: historyRows } = await supabase
-        .from("competitor_history")
-        .select("*")
-        .eq("book_id", comp.id)
-        .order("recorded_at", { ascending: true });
+    const competitorList = competitorRows || [];
+    const asinList = [...new Set(competitorList.map((comp) => comp.asin).filter(Boolean))];
+    const historyByAsin = new Map<string, any[]>();
 
-      const historicalData = {
-        dates: historyRows?.map((h) => h.recorded_at?.split("T")[0]) || [],
-        bsr: historyRows?.map((h) => h.bsr || 0) || [],
-        price: historyRows?.map((h) => Number(h.price) || 0) || [],
-        reviews: historyRows?.map((h) => h.reviews || 0) || [],
-        estimatedSales: historyRows?.map((h) => h.estimated_sales || 0) || [],
+    if (asinList.length > 0) {
+      const { data: allBookRows, error: allBookRowsError } = await supabase
+        .from("competitor_books")
+        .select("id, asin")
+        .in("asin", asinList);
+
+      if (allBookRowsError) {
+        console.error("Error fetching ASIN history books:", allBookRowsError);
+      } else {
+        const bookIdToAsin = new Map((allBookRows || []).map((book) => [book.id, book.asin]));
+        const allBookIds = [...bookIdToAsin.keys()];
+
+        if (allBookIds.length > 0) {
+          const { data: allHistoryRows, error: allHistoryError } = await supabase
+            .from("competitor_history")
+            .select("*")
+            .in("book_id", allBookIds)
+            .order("recorded_at", { ascending: true });
+
+          if (allHistoryError) {
+            console.error("Error fetching ASIN history rows:", allHistoryError);
+          } else {
+            for (const row of allHistoryRows || []) {
+              const asin = bookIdToAsin.get(row.book_id);
+              if (!asin) continue;
+              const rows = historyByAsin.get(asin) || [];
+              rows.push(row);
+              historyByAsin.set(asin, rows);
+            }
+          }
+        }
+      }
+    }
+
+    const buildAsinHistory = (asin: string) => {
+      const rows = historyByAsin.get(asin) || [];
+      const byDay = new Map<string, any>();
+
+      for (const row of rows) {
+        const day = row.recorded_at?.split("T")[0];
+        if (!day || !Number(row.bsr)) continue;
+        byDay.set(day, row);
+      }
+
+      const dedupedRows = [...byDay.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([, row]) => row);
+
+      return {
+        dates: dedupedRows.map((h) => h.recorded_at?.split("T")[0]) || [],
+        bsr: dedupedRows.map((h) => h.bsr || 0) || [],
+        price: dedupedRows.map((h) => Number(h.price) || 0) || [],
+        reviews: dedupedRows.map((h) => h.reviews || 0) || [],
+        estimatedSales: dedupedRows.map((h) => h.estimated_sales || 0) || [],
       };
+    };
+
+    // Fetch historical data by ASIN across all analyses, not only this analysis row.
+    const competitors: CompetitorBook[] = [];
+    for (const comp of competitorList) {
+      const historicalData = buildAsinHistory(comp.asin);
 
       // Calculate real KDP royalty for this competitor
       const bookPages = comp.pages || estimatePageCount(comp.title, comp.format || 'Paperback');
@@ -809,7 +894,7 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
     // from the top sellers in the niche so the Optimistic scenario matches the
     // best-seller's monthly royalty shown on its card.
     // ====================================================================
-    const competitorsWithData = competitors.filter(c => c.price > 0 && c.bsr > 0);
+    const competitorsWithData = competitors.filter(c => c.price > 0 && c.bsr > 0 && (c.pages || 0) >= 24);
 
     // Compute per-competitor monthly profit using THEIR own data
     type PerBookProfit = {
@@ -819,6 +904,7 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
       monthlyProfit: number;
       price: number;
       royaltyPerCopy: number;
+      bsr: number;
     };
 
     const perBook: PerBookProfit[] = competitorsWithData.map(c => {
@@ -836,6 +922,7 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
         monthlyProfit: Math.round(dailySales * 30 * royaltyPerCopy),
         price: c.price,
         royaltyPerCopy,
+        bsr: c.bsr,
       };
     });
 
@@ -861,25 +948,16 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
         dailyRoyaltyRange: { min: 0, max: 0 },
       };
     } else {
-      // Sort by monthly profit ascending — anchor scenarios to REAL books
-      const sorted = [...perBook].sort((a, b) => a.monthlyProfit - b.monthlyProfit);
-      const worst = sorted[0];
-      const best = sorted[sorted.length - 1];
-      // Median (true middle) — represents a realistic position for a new entrant
-      const mid = sorted.length % 2 === 1
-        ? sorted[(sorted.length - 1) / 2]
-        : (() => {
-            const a = sorted[sorted.length / 2 - 1];
-            const b = sorted[sorted.length / 2];
-            return {
-              dailySales: (a.dailySales + b.dailySales) / 2,
-              monthlySales: Math.round((a.monthlySales + b.monthlySales) / 2),
-              monthlyRevenue: Math.round((a.monthlyRevenue + b.monthlyRevenue) / 2),
-              monthlyProfit: Math.round((a.monthlyProfit + b.monthlyProfit) / 2),
-              price: (a.price + b.price) / 2,
-              royaltyPerCopy: (a.royaltyPerCopy + b.royaltyPerCopy) / 2,
-            } as PerBookProfit;
-          })();
+      const topBestSellers = [...perBook].sort((a, b) => a.bsr - b.bsr).slice(0, Math.min(5, perBook.length));
+      const topCount = topBestSellers.length;
+      const sortedByDailyProfit = [...topBestSellers].sort((a, b) => a.monthlyProfit - b.monthlyProfit);
+      const worst = sortedByDailyProfit[0];
+      const best = sortedByDailyProfit[sortedByDailyProfit.length - 1];
+      const averageTop = {
+        monthlySales: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlySales, 0) / topCount),
+        monthlyRevenue: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlyRevenue, 0) / topCount),
+        monthlyProfit: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlyProfit, 0) / topCount),
+      };
 
       realProfit = {
         conservative: {
@@ -888,9 +966,9 @@ export async function getAnalysisById(analysisId: string): Promise<AnalysisRespo
           monthlyProfit: worst.monthlyProfit,
         },
         expected: {
-          monthlySales: mid.monthlySales,
-          monthlyRevenue: mid.monthlyRevenue,
-          monthlyProfit: mid.monthlyProfit,
+          monthlySales: averageTop.monthlySales,
+          monthlyRevenue: averageTop.monthlyRevenue,
+          monthlyProfit: averageTop.monthlyProfit,
         },
         optimistic: {
           monthlySales: best.monthlySales,

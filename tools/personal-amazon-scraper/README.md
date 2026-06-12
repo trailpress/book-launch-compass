@@ -15,8 +15,7 @@ predefinito `10001` prima di raccogliere i dati.
 cd "/Users/Pippo/Documents/Porting from Lovable/Book Launch Compass"
 python3 -m venv .venv-scraper
 source .venv-scraper/bin/activate
-pip install -r tools/personal-amazon-scraper/requirements.txt
-pip install certifi
+pip install -r tools/personal-amazon-scraper/requirements-scraper.txt
 python -m playwright install chromium
 ```
 

@@ -375,22 +375,22 @@ export function CompetitorCard({ competitor }: CompetitorCardProps) {
         </div>
       </div>
 
-      {/* Historical Chart (Helium 10 Style) - only show if we have real data */}
-      {showChart && competitor.historicalData && competitor.historicalData.dates?.length > 0 && competitor.bsr > 0 && (
+      {/* Historical Chart: current BSR snapshot first, real history as repeated scans accumulate */}
+      {showChart && competitor.bsr > 0 && (
         <div className="border-t border-border p-4 bg-muted/20">
           <HistoricalChart
             bookTitle={competitor.title}
-            data={competitor.historicalData}
+            data={competitor.historicalData || { dates: [], bsr: [], price: [], reviews: [], estimatedSales: [] }}
             currentBsr={competitor.bsr}
             currentPrice={competitor.price}
             currentReviews={competitor.reviews}
           />
         </div>
       )}
-      {showChart && (!competitor.historicalData?.dates?.length || !competitor.bsr) && (
+      {showChart && !competitor.bsr && (
         <div className="border-t border-border p-4 bg-muted/20 text-center">
           <p className="text-muted-foreground text-sm">
-            Historical data not available - BSR data required for chart
+            BSR corrente non disponibile: serve almeno un BSR reale per iniziare il tracciamento.
           </p>
         </div>
       )}

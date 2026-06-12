@@ -75,6 +75,7 @@ export function SocialInsightsCard({ excerpts }: SocialInsightsCardProps) {
     const scoreB = b.relevanceScore + (b.upvotes || 0) * 0.1 + (b.comments || 0) * 0.2;
     return scoreB - scoreA;
   });
+  const sourcesPresent = Array.from(new Set(excerpts.map((excerpt) => excerpt.source))).join(", ");
 
   return (
     <div className="glass-card rounded-2xl p-6 border border-border/50">
@@ -83,9 +84,9 @@ export function SocialInsightsCard({ excerpts }: SocialInsightsCardProps) {
           <MessageSquare className="w-5 h-5 text-purple-400" />
         </div>
         <div>
-          <h3 className="text-xl font-bold">Real Community Insights</h3>
+          <h3 className="text-xl font-bold">Estratti Verificabili</h3>
           <p className="text-sm text-muted-foreground">
-            {excerpts.length} estratti reali da Reddit, Quora, YouTube, forum e Amazon · clicca "Source" per verificare l'origine
+            {excerpts.length} estratti da {sourcesPresent || "fonti disponibili"} · apri "Source" per verificarli
           </p>
         </div>
       </div>
@@ -208,7 +209,7 @@ export function SocialInsightsCard({ excerpts }: SocialInsightsCardProps) {
             <div className="text-2xl font-bold text-red-500">
               {excerpts.filter(e => e.source === "YouTube").length}
             </div>
-            <div className="text-xs text-muted-foreground">YouTube Comments</div>
+            <div className="text-xs text-muted-foreground">YouTube Signals</div>
           </div>
           <div className="text-center p-3 rounded-lg bg-blue-500/5">
             <div className="text-2xl font-bold text-blue-400">

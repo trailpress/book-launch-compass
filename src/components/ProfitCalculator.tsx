@@ -63,7 +63,7 @@ export function ProfitCalculator({
       border: "border-border",
     },
     {
-      name: "Previsto",
+      name: "Media Top Bestseller",
       data: expected,
       color: "text-primary",
       bg: "bg-primary/10",
@@ -78,7 +78,9 @@ export function ProfitCalculator({
     },
   ];
 
-  const expectedDailyProfit = expected.monthlyProfit / 30;
+  const averageTopDailyProfit = expected.monthlyProfit / 30;
+  const averageTopMonthlyProfit = averageTopDailyProfit * 30;
+  const averageTopAnnualProfit = averageTopMonthlyProfit * 12;
 
   return (
     <div className="glass-card p-6 animate-fade-in">
@@ -89,7 +91,7 @@ export function ProfitCalculator({
         <div>
           <h3 className="text-xl font-bold">Scenari di Profitto Reali</h3>
           <p className="text-sm text-muted-foreground">
-            Ancorati ai competitor reali: peggiore / mediano / best seller della nicchia
+            Media dei top bestseller comparabili della nicchia, ordinati per BSR
           </p>
         </div>
       </div>
@@ -140,7 +142,7 @@ export function ProfitCalculator({
               <div className="p-4 rounded-xl bg-gradient-to-br from-gold/10 to-amber-500/10 border border-gold/20 text-center cursor-help">
                 <TrendingUp className="w-5 h-5 text-gold mx-auto mb-2" />
                 <p className="text-2xl font-bold text-gold">
-                  {formatCurrencyDecimal(expectedDailyProfit)}
+                  {formatCurrencyDecimal(averageTopDailyProfit)}
                 </p>
                 <p className="text-xs text-muted-foreground">Royalty/Giorno</p>
               </div>
@@ -178,7 +180,7 @@ export function ProfitCalculator({
                   "text-2xl font-bold",
                   scenario.name === "Ottimistico"
                     ? "text-success"
-                    : scenario.name === "Previsto"
+                    : scenario.name === "Media Top Bestseller"
                     ? "text-primary"
                     : "text-muted-foreground"
                 )}
@@ -190,7 +192,7 @@ export function ProfitCalculator({
               </span>
             </div>
 
-            <div className="grid grid-cols-3 gap-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
               <div>
                 <p className="text-muted-foreground">Vendite/Mese</p>
                 <p className="font-medium text-foreground">
@@ -219,12 +221,18 @@ export function ProfitCalculator({
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground mb-1">
-              Profitto Annuale Previsto
+              Media Annuale Top Bestseller
             </p>
             {expected.monthlyProfit > 0 ? (
-              <p className="text-3xl font-bold gradient-text-gold">
-                {formatCurrency(expected.monthlyProfit * 12)}
-              </p>
+              <div>
+                <p className="text-3xl font-bold gradient-text-gold">
+                  {formatCurrency(averageTopAnnualProfit)}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                  {formatCurrencyDecimal(averageTopDailyProfit)}/giorno x 30 giorni x 12 mesi.
+                  Mese medio: {formatCurrency(averageTopMonthlyProfit)}.
+                </p>
+              </div>
             ) : (
               <p className="text-lg font-semibold text-muted-foreground">
                 Dati BSR insufficienti per una stima reale
@@ -239,7 +247,7 @@ export function ProfitCalculator({
               <TooltipContent className="max-w-xs">
                 <p className="text-xs">
                   {expected.monthlyProfit > 0
-                    ? "Proiezione annua dello scenario Previsto (= competitor mediano della nicchia): royalty mensile × 12. L'Ottimistico corrisponde al best seller reale visualizzato sopra."
+                    ? "Calcolo meccanico dalla media dei top bestseller comparabili: royalty netta stimata al giorno x 30 x 12. Il dato giornaliero deriva da BSR Amazon visibile e royalty KDP stimata da prezzo e pagine."
                     : "Nessun BSR reale disponibile per i competitor: non mostriamo stime fittizie. Riprova con una nicchia con dati Amazon più completi."}
                 </p>
               </TooltipContent>

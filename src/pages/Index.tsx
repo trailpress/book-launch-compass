@@ -23,19 +23,25 @@ const Index = () => {
   const [isResuming, setIsResuming] = useState(isAnalyzing); // true only on page load resume
   const [loadedData, setLoadedData] = useState<AnalysisData | null>(null);
 
+  const isSameNiche = (analysis: AnalysisData | null, query: string) =>
+    Boolean(analysis?.niche) && analysis.niche.trim().toLowerCase() === query.trim().toLowerCase();
+
   // Restore loaded data if we have an analysis ID
   useEffect(() => {
     if (loadedAnalysisId && hasSearched && !loadedData && !isLoading) {
       setIsLoading(true);
       getAnalysisById(loadedAnalysisId).then((result) => {
-        if (result.success && result.data) {
+        if (result.success && result.data && isSameNiche(result.data, searchQuery)) {
           setLoadedData(result.data);
+        } else {
+          setLoadedAnalysisId(null);
+          setLoadedData(null);
         }
         setIsAnalyzing(false);
         setIsLoading(false);
       });
     }
-  }, [loadedAnalysisId, hasSearched, loadedData, isLoading, setIsAnalyzing]);
+  }, [loadedAnalysisId, hasSearched, loadedData, isLoading, searchQuery, setIsAnalyzing, setLoadedAnalysisId]);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
@@ -64,7 +70,7 @@ const Index = () => {
     
     const result = await getAnalysisById(analysisId);
     
-    if (result.success && result.data) {
+    if (result.success && result.data && isSameNiche(result.data, niche)) {
       setLoadedData(result.data);
     }
     

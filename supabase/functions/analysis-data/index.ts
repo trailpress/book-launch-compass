@@ -57,17 +57,38 @@ function calculateRiskScore({
 
 function estimateDailySalesFromBSR(bsr: number): { min: number; max: number; avg: number } {
   if (!bsr || bsr <= 0) return { min: 0, max: 0, avg: 0 };
-  if (bsr <= 100) return { min: 100, max: 250, avg: 150 };
-  if (bsr <= 500) return { min: 50, max: 100, avg: 75 };
-  if (bsr <= 1000) return { min: 25, max: 50, avg: 35 };
-  if (bsr <= 5000) return { min: 10, max: 25, avg: 15 };
-  if (bsr <= 10000) return { min: 5, max: 10, avg: 7 };
-  if (bsr <= 20000) return { min: 3, max: 5, avg: 4 };
-  if (bsr <= 50000) return { min: 2, max: 3, avg: 2.5 };
-  if (bsr <= 100000) return { min: 1, max: 2, avg: 1.5 };
-  if (bsr <= 200000) return { min: 0.5, max: 1, avg: 0.7 };
-  if (bsr <= 500000) return { min: 0.2, max: 0.5, avg: 0.3 };
-  return { min: 0.05, max: 0.2, avg: 0.1 };
+  const anchors = [
+    { bsr: 100, avg: 150 },
+    { bsr: 500, avg: 75 },
+    { bsr: 1000, avg: 35 },
+    { bsr: 5000, avg: 15 },
+    { bsr: 10000, avg: 7 },
+    { bsr: 20000, avg: 4 },
+    { bsr: 50000, avg: 2.5 },
+    { bsr: 100000, avg: 1.5 },
+    { bsr: 200000, avg: 0.7 },
+    { bsr: 500000, avg: 0.3 },
+    { bsr: 1000000, avg: 0.1 },
+  ];
+
+  if (bsr <= anchors[0].bsr) {
+    const avg = Math.min(250, anchors[0].avg * Math.sqrt(anchors[0].bsr / Math.max(1, bsr)));
+    return { min: avg * 0.65, max: avg * 1.45, avg };
+  }
+
+  const upper = anchors.find((anchor) => bsr <= anchor.bsr) || anchors[anchors.length - 1];
+  const lowerIndex = Math.max(0, anchors.indexOf(upper) - 1);
+  const lower = anchors[lowerIndex];
+  const logRatio =
+    (Math.log(bsr) - Math.log(lower.bsr)) /
+    (Math.log(upper.bsr) - Math.log(lower.bsr));
+  const avg = lower.avg + (upper.avg - lower.avg) * Math.max(0, Math.min(1, logRatio));
+
+  return {
+    min: avg * 0.65,
+    max: avg * 1.45,
+    avg,
+  };
 }
 
 function isLikelyColorBook(title: string, category?: string): boolean {
@@ -396,34 +417,64 @@ serve(async (req) => {
       if (competitorError) throw competitorError;
 
       const competitorList = competitorRows || [];
-      const competitorIds = competitorList.map((comp) => comp.id).filter(Boolean);
+      const asinList = [...new Set(competitorList.map((comp) => comp.asin).filter(Boolean))];
 
-      const historyByBookId = new Map<string, any[]>();
-      if (competitorIds.length > 0) {
-        const { data: historyRows, error: historyError } = await supabase
-          .from("competitor_history")
-          .select("*")
-          .in("book_id", competitorIds)
-          .order("recorded_at", { ascending: true });
+      const historyByAsin = new Map<string, any[]>();
+      if (asinList.length > 0) {
+        const { data: allBookRows, error: allBookRowsError } = await supabase
+          .from("competitor_books")
+          .select("id, asin")
+          .in("asin", asinList);
 
-        if (historyError) throw historyError;
+        if (allBookRowsError) throw allBookRowsError;
 
-        for (const row of historyRows || []) {
-          const existing = historyByBookId.get(row.book_id) || [];
-          existing.push(row);
-          historyByBookId.set(row.book_id, existing);
+        const bookIdToAsin = new Map((allBookRows || []).map((book) => [book.id, book.asin]));
+        const allBookIds = [...bookIdToAsin.keys()];
+
+        if (allBookIds.length > 0) {
+          const { data: historyRows, error: historyError } = await supabase
+            .from("competitor_history")
+            .select("*")
+            .in("book_id", allBookIds)
+            .order("recorded_at", { ascending: true });
+
+          if (historyError) throw historyError;
+
+          for (const row of historyRows || []) {
+            const asin = bookIdToAsin.get(row.book_id);
+            if (!asin) continue;
+            const existing = historyByAsin.get(asin) || [];
+            existing.push(row);
+            historyByAsin.set(asin, existing);
+          }
         }
       }
 
-      const competitors = competitorList.map((comp, index) => {
-        const historyRows = historyByBookId.get(comp.id) || [];
-        const historicalData = {
-          dates: historyRows.map((h) => h.recorded_at?.split("T")[0].slice(0, 7)),
-          bsr: historyRows.map((h) => h.bsr || 0),
-          price: historyRows.map((h) => Number(h.price) || 0),
-          reviews: historyRows.map((h) => h.reviews || 0),
-          estimatedSales: historyRows.map((h) => h.estimated_sales || 0),
+      const buildAsinHistory = (asin: string) => {
+        const rows = historyByAsin.get(asin) || [];
+        const byDay = new Map<string, any>();
+
+        for (const row of rows) {
+          const day = row.recorded_at?.split("T")[0];
+          if (!day || !Number(row.bsr)) continue;
+          byDay.set(day, row);
+        }
+
+        const dedupedRows = [...byDay.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([, row]) => row);
+
+        return {
+          dates: dedupedRows.map((h) => h.recorded_at?.split("T")[0]),
+          bsr: dedupedRows.map((h) => h.bsr || 0),
+          price: dedupedRows.map((h) => Number(h.price) || 0),
+          reviews: dedupedRows.map((h) => h.reviews || 0),
+          estimatedSales: dedupedRows.map((h) => h.estimated_sales || 0),
         };
+      };
+
+      const competitors = competitorList.map((comp, index) => {
+        const historicalData = buildAsinHistory(comp.asin);
 
         const currentPrice = Number(comp.current_price) || 0;
         const pageCount = comp.pages || estimatePageCount(comp.title, comp.format || "Paperback");
@@ -458,7 +509,7 @@ serve(async (req) => {
         };
       });
 
-      const competitorsWithData = competitors.filter((comp) => comp.price > 0 && comp.bsr > 0);
+      const competitorsWithData = competitors.filter((comp) => comp.price > 0 && comp.bsr > 0 && (comp.pages || 0) >= 24);
       const priceSource = competitors.filter((comp) => comp.price > 0);
       const avgPriceFallback = priceSource.length > 0
         ? priceSource.reduce((sum, comp) => sum + comp.price, 0) / priceSource.length
@@ -470,6 +521,7 @@ serve(async (req) => {
         monthlyProfit: number;
         price: number;
         royaltyPerCopy: number;
+        bsr: number;
       };
 
       const perBook: PerBookProfit[] = competitorsWithData.map((comp) => {
@@ -480,6 +532,7 @@ serve(async (req) => {
           monthlyProfit: Math.round(dailySales * 30 * comp.profitPerCopy),
           price: comp.price,
           royaltyPerCopy: comp.profitPerCopy,
+          bsr: comp.bsr,
         };
       });
 
@@ -500,18 +553,16 @@ serve(async (req) => {
             dailyRoyaltyRange: { min: 0, max: 0 },
           }
         : (() => {
-            const sorted = [...perBook].sort((a, b) => a.monthlyProfit - b.monthlyProfit);
-            const worst = sorted[0];
-            const best = sorted[sorted.length - 1];
-            const expected = sorted.length % 2 === 1
-              ? sorted[(sorted.length - 1) / 2]
-              : {
-                  monthlySales: Math.round((sorted[sorted.length / 2 - 1].monthlySales + sorted[sorted.length / 2].monthlySales) / 2),
-                  monthlyRevenue: Math.round((sorted[sorted.length / 2 - 1].monthlyRevenue + sorted[sorted.length / 2].monthlyRevenue) / 2),
-                  monthlyProfit: Math.round((sorted[sorted.length / 2 - 1].monthlyProfit + sorted[sorted.length / 2].monthlyProfit) / 2),
-                  price: (sorted[sorted.length / 2 - 1].price + sorted[sorted.length / 2].price) / 2,
-                  royaltyPerCopy: (sorted[sorted.length / 2 - 1].royaltyPerCopy + sorted[sorted.length / 2].royaltyPerCopy) / 2,
-                };
+            const topBestSellers = [...perBook].sort((a, b) => a.bsr - b.bsr).slice(0, Math.min(5, perBook.length));
+            const topCount = topBestSellers.length;
+            const sortedByDailyProfit = [...topBestSellers].sort((a, b) => a.monthlyProfit - b.monthlyProfit);
+            const worst = sortedByDailyProfit[0];
+            const best = sortedByDailyProfit[sortedByDailyProfit.length - 1];
+            const expected = {
+              monthlySales: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlySales, 0) / topCount),
+              monthlyRevenue: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlyRevenue, 0) / topCount),
+              monthlyProfit: Math.round(topBestSellers.reduce((sum, book) => sum + book.monthlyProfit, 0) / topCount),
+            };
 
             return {
               conservative: {

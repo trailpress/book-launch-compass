@@ -9,10 +9,10 @@ const SEARCH_STATE_KEY = "kdp_search_state_v2";
 const OFFLINE_SUGGESTIONS_COOLDOWN_MS = 60_000;
 const FALLBACK_SUGGESTIONS = [
   "anxiety workbooks",
-  "low content journals",
-  "truck driver logbooks",
-  "self-care planners",
-  "budget trackers",
+  "glacier national park travel guide",
+  "national park hiking guide",
+  "road trip planner",
+  "camping meal planner",
 ];
 
 interface SearchInputProps {
@@ -377,7 +377,7 @@ export function SearchInput({ onSearch, isLoading = false }: SearchInputProps) {
               }}
               onFocus={() => setShowSuggestions(query.trim().length >= 2)}
               onKeyDown={handleKeyDown}
-              placeholder="Enter a niche or keyword (e.g., anxiety workbooks, truck driver logbooks)"
+              placeholder="Enter a niche or keyword (e.g., glacier national park travel guide)"
               className="flex-1 py-5 px-4 bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none text-lg"
               disabled={isLoading}
               autoComplete="off"

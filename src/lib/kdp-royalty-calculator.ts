@@ -181,18 +181,39 @@ export function calculateRoyalty(
  */
 export function estimateDailySalesFromBSR(bsr: number): { min: number; max: number; avg: number } {
   if (!bsr || bsr <= 0) return { min: 0, max: 0, avg: 0 };
-  
-  if (bsr <= 100) return { min: 100, max: 250, avg: 150 };
-  if (bsr <= 500) return { min: 50, max: 100, avg: 75 };
-  if (bsr <= 1000) return { min: 25, max: 50, avg: 35 };
-  if (bsr <= 5000) return { min: 10, max: 25, avg: 15 };
-  if (bsr <= 10000) return { min: 5, max: 10, avg: 7 };
-  if (bsr <= 20000) return { min: 3, max: 5, avg: 4 };
-  if (bsr <= 50000) return { min: 2, max: 3, avg: 2.5 };
-  if (bsr <= 100000) return { min: 1, max: 2, avg: 1.5 };
-  if (bsr <= 200000) return { min: 0.5, max: 1, avg: 0.7 };
-  if (bsr <= 500000) return { min: 0.2, max: 0.5, avg: 0.3 };
-  return { min: 0.05, max: 0.2, avg: 0.1 };
+
+  const anchors = [
+    { bsr: 100, avg: 150 },
+    { bsr: 500, avg: 75 },
+    { bsr: 1000, avg: 35 },
+    { bsr: 5000, avg: 15 },
+    { bsr: 10000, avg: 7 },
+    { bsr: 20000, avg: 4 },
+    { bsr: 50000, avg: 2.5 },
+    { bsr: 100000, avg: 1.5 },
+    { bsr: 200000, avg: 0.7 },
+    { bsr: 500000, avg: 0.3 },
+    { bsr: 1000000, avg: 0.1 },
+  ];
+
+  if (bsr <= anchors[0].bsr) {
+    const avg = Math.min(250, anchors[0].avg * Math.sqrt(anchors[0].bsr / Math.max(1, bsr)));
+    return { min: avg * 0.65, max: avg * 1.45, avg };
+  }
+
+  const upper = anchors.find((anchor) => bsr <= anchor.bsr) || anchors[anchors.length - 1];
+  const lowerIndex = Math.max(0, anchors.indexOf(upper) - 1);
+  const lower = anchors[lowerIndex];
+  const logRatio =
+    (Math.log(bsr) - Math.log(lower.bsr)) /
+    (Math.log(upper.bsr) - Math.log(lower.bsr));
+  const avg = lower.avg + (upper.avg - lower.avg) * Math.max(0, Math.min(1, logRatio));
+
+  return {
+    min: avg * 0.65,
+    max: avg * 1.45,
+    avg,
+  };
 }
 
 /**

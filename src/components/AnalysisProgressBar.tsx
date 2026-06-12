@@ -73,8 +73,8 @@ export function AnalysisProgressBar({ niche, isLoading, startedAt }: AnalysisPro
     const elapsed = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
     if (elapsed > 0) {
       setElapsedTime(elapsed);
-      // Calculate progress based on elapsed time
-      const progressRatio = Math.min(elapsed / totalDuration, 0.95);
+      // Calculate progress based on elapsed time without claiming completion.
+      const progressRatio = Math.min(elapsed / totalDuration, 0.99);
       setProgress(progressRatio * 100);
       // Calculate which phase we should be in
       let cumulative = 0;
@@ -98,9 +98,10 @@ export function AnalysisProgressBar({ niche, isLoading, startedAt }: AnalysisPro
     // Progress animation
     const progressInterval = setInterval(() => {
       setProgress(prev => {
-        // Slow down as we approach 95%
+        // Slow down as we approach completion. The backend decides when the
+        // analysis is actually done; the bar never reaches 100% on its own.
         const increment = prev < 50 ? 1.5 : prev < 80 ? 0.8 : 0.3;
-        return Math.min(prev + increment, 95);
+        return Math.min(prev + increment, 99);
       });
     }, 1000);
 

@@ -12,8 +12,9 @@ import {
 } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, TrendingDown, DollarSign, BarChart3, Star, ShoppingCart, Calendar } from "lucide-react";
+import { TrendingUp, DollarSign, BarChart3, Star, ShoppingCart, Calendar, Minus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { estimateDailySalesFromBSR } from "@/lib/kdp-royalty-calculator";
 
 interface HistoricalData {
   dates: string[];
@@ -43,9 +44,21 @@ export function HistoricalChart({
 }: HistoricalChartProps) {
   const [activeMetric, setActiveMetric] = useState<"bsr" | "sales" | "reviews" | "price">("bsr");
   const [timeRange, setTimeRange] = useState<TimeRange>("all");
+  const hasStoredHistory = data.dates.length > 0 && data.bsr.some((value) => Number(value) > 0);
+  const today = new Date().toISOString().split("T")[0];
+  const normalizedData: HistoricalData = hasStoredHistory
+    ? data
+    : {
+        dates: [today],
+        bsr: [currentBsr || 0],
+        price: [currentPrice || 0],
+        reviews: [currentReviews || 0],
+        estimatedSales: [currentBsr ? Math.round(estimateDailySalesFromBSR(currentBsr).avg * 30) : 0],
+        isProjection: false,
+      };
 
   // Transform data for recharts
-  const allChartData = data.dates.map((date, i) => {
+  const allChartData = normalizedData.dates.map((date, i) => {
     // Handle both YYYY-MM-DD and YYYY-MM formats
     const dateObj = date.length === 10 ? new Date(date) : new Date(date + "-15");
     const label = date.length === 10 
@@ -54,10 +67,10 @@ export function HistoricalChart({
     return {
       date: label,
       fullDate: date,
-      bsr: data.bsr[i],
-      sales: data.estimatedSales[i],
-      reviews: data.reviews[i],
-      price: data.price[i],
+      bsr: normalizedData.bsr[i],
+      sales: normalizedData.estimatedSales[i],
+      reviews: normalizedData.reviews[i],
+      price: normalizedData.price[i],
     };
   });
 
@@ -84,9 +97,10 @@ export function HistoricalChart({
   const chartData = filterDataByRange(timeRange);
 
   // Calculate trends
-  const bsrTrend = data.bsr[0] > data.bsr[data.bsr.length - 1] ? "improving" : "declining";
-  const salesTrend = data.estimatedSales[0] < data.estimatedSales[data.estimatedSales.length - 1] ? "growing" : "declining";
-  const reviewsTrend = data.reviews[0] < data.reviews[data.reviews.length - 1] ? "growing" : "stable";
+  const hasMultiplePoints = allChartData.length > 1;
+  const bsrTrend = hasMultiplePoints && normalizedData.bsr[0] > normalizedData.bsr[normalizedData.bsr.length - 1] ? "improving" : "stable";
+  const salesTrend = hasMultiplePoints && normalizedData.estimatedSales[0] < normalizedData.estimatedSales[normalizedData.estimatedSales.length - 1] ? "growing" : "stable";
+  const reviewsTrend = hasMultiplePoints && normalizedData.reviews[0] < normalizedData.reviews[normalizedData.reviews.length - 1] ? "growing" : "stable";
 
   // Calculate moving average
   const calculateMovingAverage = (values: number[], window: number = 3) => {
@@ -126,7 +140,7 @@ export function HistoricalChart({
       color: "hsl(var(--success))",
       icon: ShoppingCart,
       trend: salesTrend,
-      current: `${data.estimatedSales[data.estimatedSales.length - 1]}/mo`,
+      current: `${normalizedData.estimatedSales[normalizedData.estimatedSales.length - 1]}/mo`,
       description: "Estimated monthly sales"
     },
     { 
@@ -194,7 +208,9 @@ export function HistoricalChart({
         <div>
           <h3 className="text-lg font-bold line-clamp-1">{bookTitle}</h3>
           <p className="text-sm text-muted-foreground">
-            {data.isProjection !== false ? "Proiezione storica (stima deterministica dal BSR attuale)" : "Andamento storico"}
+            {hasStoredHistory
+              ? "Storico reale salvato dalle analisi precedenti"
+              : "Snapshot corrente: lo storico reale iniziera' dalle prossime scansioni"}
           </p>
         </div>
         
@@ -203,13 +219,13 @@ export function HistoricalChart({
             variant="outline" 
             className={cn(
               "gap-1",
-              bsrTrend === "improving" ? "border-success text-success" : "border-danger text-danger"
+              bsrTrend === "improving" ? "border-success text-success" : "border-muted-foreground text-muted-foreground"
             )}
           >
             {bsrTrend === "improving" ? (
               <TrendingUp className="w-3 h-3" />
             ) : (
-              <TrendingDown className="w-3 h-3" />
+              <Minus className="w-3 h-3" />
             )}
             BSR {bsrTrend}
           </Badge>
@@ -278,7 +294,7 @@ export function HistoricalChart({
         </div>
         <div className="flex items-center gap-1 ml-auto">
           <span className="w-3 h-0.5 bg-muted-foreground/50" style={{ borderStyle: "dashed" }} />
-          <span>Moving Avg (3mo)</span>
+          <span>{hasMultiplePoints ? "Moving Avg (3pt)" : "Snapshot corrente"}</span>
         </div>
       </div>
 
@@ -338,7 +354,7 @@ export function HistoricalChart({
               strokeDasharray="5 5"
               dot={false}
               name="Moving Avg"
-              opacity={0.7}
+              opacity={hasMultiplePoints ? 0.7 : 0}
             />
             
             <Line
@@ -355,7 +371,7 @@ export function HistoricalChart({
       </div>
 
       <p className="text-xs text-muted-foreground mt-4 text-center">
-        {activeMetricData.description} • Showing {chartData.length} data points
+        {activeMetricData.description} • {hasStoredHistory ? `${chartData.length} punti storici reali` : "1 punto corrente verificato"}
       </p>
     </div>
   );
