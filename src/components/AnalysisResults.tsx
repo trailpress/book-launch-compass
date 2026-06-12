@@ -109,6 +109,7 @@ export function AnalysisResults({
     setSlowAnalysisNotice(false);
     onLoadingChange(true);
     setPollingStartTime(analysisStartedAt ?? Date.now());
+    setLoadingPhase("Avvio raccolta verificata...");
     
     // Loading phases for user feedback
     const phases = [

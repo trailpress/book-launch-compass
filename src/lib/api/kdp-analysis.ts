@@ -464,6 +464,9 @@ const LOCAL_SCRAPER_PORT = 8788;
 
 function getLocalScraperBaseUrl() {
   const host = window.location.hostname || "127.0.0.1";
+  if (window.location.protocol === "https:") {
+    return "";
+  }
   const scraperHost = host === "localhost" ? "127.0.0.1" : host;
   return `http://${scraperHost}:${LOCAL_SCRAPER_PORT}`;
 }
@@ -483,6 +486,13 @@ async function getLocalAnalysisJobStatus(jobId: string): Promise<LocalAnalysisJo
 async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boolean; localJobId?: string; error?: string }> {
   const baseUrl = getLocalScraperBaseUrl();
   const maxAttempts = 3;
+
+  if (!baseUrl) {
+    return {
+      started: false,
+      error: "Questa versione pubblica su GitHub Pages non puo avviare lo scraper locale dal browser. Per analisi complete usa l'app locale su http://127.0.0.1:8080 con il raccoglitore attivo, oppure usa la pagina pubblica solo per consultare analisi gia salvate.",
+    };
+  }
 
   try {
     const healthResponse = await fetch(`${baseUrl}/health`, { method: "GET" });
