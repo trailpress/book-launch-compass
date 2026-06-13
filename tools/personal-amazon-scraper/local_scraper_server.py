@@ -200,7 +200,8 @@ def run_scraper_job(job_id: str, command: list[str]) -> None:
             command,
             cwd=str(ROOT),
             text=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         with PROCESSES_LOCK:
             PROCESSES[job_id] = process
