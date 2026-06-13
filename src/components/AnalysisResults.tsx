@@ -339,7 +339,25 @@ export function AnalysisResults({
   }
 
   if (!data) {
-    return null;
+    return (
+      <div className="container py-24">
+        <div className="flex flex-col items-center justify-center gap-6 max-w-xl mx-auto text-center">
+          <div className="p-4 rounded-full bg-primary/10">
+            <RefreshCw className="w-12 h-12 text-primary" />
+          </div>
+          <div>
+            <h3 className="text-2xl font-bold mb-2">Analisi non caricata</h3>
+            <p className="text-muted-foreground mb-4">
+              La ricerca salvata non ha piu un risultato attivo da mostrare. Puoi riprendere la raccolta verificata oppure avviare una nuova ricerca.
+            </p>
+          </div>
+          <Button onClick={runAnalysis} variant="default" className="gap-2">
+            <RefreshCw className="w-4 h-4" />
+            Riprendi analisi
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   const qualitativeCount = data.socialExcerpts?.length || 0;
