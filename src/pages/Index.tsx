@@ -132,6 +132,7 @@ const Index = () => {
             initialData={loadedData}
             onLoadAnalysis={handleLoadAnalysis}
             onAnalysisComplete={handleAnalysisComplete}
+            onResetSearch={handleNewSearch}
           />
         </>
       )}

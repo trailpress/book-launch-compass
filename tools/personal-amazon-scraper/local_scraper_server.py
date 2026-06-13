@@ -25,7 +25,9 @@ SCRAPER = Path(__file__).resolve().parent / "scrape_amazon_kdp.py"
 HOST = "0.0.0.0"
 PORT = 8788
 JOBS: dict[str, dict[str, Any]] = {}
+PROCESSES: dict[str, subprocess.Popen[str]] = {}
 JOBS_LOCK = threading.Lock()
+PROCESSES_LOCK = threading.Lock()
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -78,6 +80,17 @@ class Handler(BaseHTTPRequestHandler):
         json_response(self, 404, {"ok": False, "error": "Not found"})
 
     def do_POST(self) -> None:
+        if self.path.rstrip("/") == "/cancel":
+            try:
+                length = int(self.headers.get("content-length", "0"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                job_id = str(payload.get("jobId") or "").strip()
+                cancelled = cancel_job(job_id)
+                json_response(self, 200, {"ok": True, "cancelled": cancelled})
+            except Exception as error:
+                json_response(self, 500, {"ok": False, "error": str(error)})
+            return
+
         if self.path.rstrip("/") != "/analyze":
             json_response(self, 404, {"ok": False, "error": "Not found"})
             return
@@ -155,19 +168,52 @@ def update_job(job_id: str, **values: Any) -> None:
         current["updatedAt"] = time.time()
 
 
+def cancel_job(job_id: str) -> bool:
+    if not job_id:
+        return False
+
+    with PROCESSES_LOCK:
+        process = PROCESSES.get(job_id)
+
+    if not process:
+        update_job(job_id, status="cancelled", phase="cancelled", error="Analisi interrotta dall'utente")
+        return False
+
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        update_job(job_id, status="cancelled", phase="cancelled", error="Analisi interrotta dall'utente")
+        return True
+    finally:
+        with PROCESSES_LOCK:
+            PROCESSES.pop(job_id, None)
+
+
 def run_scraper_job(job_id: str, command: list[str]) -> None:
     try:
         update_job(job_id, phase="running_scraper")
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=str(ROOT),
             text=True,
             capture_output=True,
-            timeout=18 * 60,
         )
-        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part.strip())
+        with PROCESSES_LOCK:
+            PROCESSES[job_id] = process
 
-        if completed.returncode != 0:
+        stdout, stderr = process.communicate(timeout=18 * 60)
+        output = "\n".join(part for part in [stdout, stderr] if part.strip())
+
+        with JOBS_LOCK:
+            current_status = JOBS.get(job_id, {}).get("status")
+        if current_status == "cancelled":
+            return
+
+        if process.returncode != 0:
             update_job(
                 job_id,
                 status="failed",
@@ -177,11 +223,11 @@ def run_scraper_job(job_id: str, command: list[str]) -> None:
             )
             return
 
-        json_start = completed.stdout.rfind("{")
+        json_start = stdout.rfind("{")
         result = None
         if json_start >= 0:
             try:
-                result = json.loads(completed.stdout[json_start:])
+                result = json.loads(stdout[json_start:])
             except json.JSONDecodeError:
                 result = None
 
@@ -193,6 +239,7 @@ def run_scraper_job(job_id: str, command: list[str]) -> None:
             logs=output[-4000:],
         )
     except subprocess.TimeoutExpired:
+        cancel_job(job_id)
         update_job(
             job_id,
             status="failed",
@@ -201,6 +248,9 @@ def run_scraper_job(job_id: str, command: list[str]) -> None:
         )
     except Exception as error:
         update_job(job_id, status="failed", phase="error", error=str(error))
+    finally:
+        with PROCESSES_LOCK:
+            PROCESSES.pop(job_id, None)
 
 
 def main() -> int:

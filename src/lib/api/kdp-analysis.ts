@@ -460,6 +460,7 @@ async function getLatestAnalysisJob(niche: string, since: string) {
 
 // Store the start time for polling reference
 let pollingStartTime: Date | null = null;
+let currentLocalJobId: string | null = null;
 const LOCAL_SCRAPER_PORT = 8788;
 
 function getLocalScraperBaseUrl() {
@@ -480,6 +481,24 @@ async function getLocalAnalysisJobStatus(jobId: string): Promise<LocalAnalysisJo
     return response.ok && payload?.ok ? payload.job as LocalAnalysisJobStatus : null;
   } catch {
     return null;
+  }
+}
+
+export async function cancelCurrentLocalAnalysis(): Promise<void> {
+  if (!currentLocalJobId) return;
+  const jobId = currentLocalJobId;
+  currentLocalJobId = null;
+
+  try {
+    const baseUrl = getLocalScraperBaseUrl();
+    if (!baseUrl) return;
+    await fetch(`${baseUrl}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId }),
+    });
+  } catch (error) {
+    console.warn("Unable to cancel local analysis:", error);
   }
 }
 
@@ -518,7 +537,8 @@ async function startVerifiedLocalAnalysis(niche: string): Promise<{ started: boo
       const payload = await response.json().catch(() => null);
 
       if (response.ok && payload?.ok !== false) {
-        return { started: true, localJobId: typeof payload?.jobId === "string" ? payload.jobId : undefined };
+        currentLocalJobId = typeof payload?.jobId === "string" ? payload.jobId : null;
+        return { started: true, localJobId: currentLocalJobId || undefined };
       }
 
       const detailText = typeof payload?.details === "string"

@@ -30,6 +30,7 @@ import { Button } from "./ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { 
   analyzeNiche,
+  cancelCurrentLocalAnalysis,
   pollForAnalysis,
   setPollingStartTime,
   AnalysisData, 
@@ -50,6 +51,7 @@ interface AnalysisResultsProps {
   initialData?: AnalysisData | null;
   onLoadAnalysis?: (analysisId: string, niche: string) => void;
   onAnalysisComplete?: (analysisId: string) => void;
+  onResetSearch?: () => void;
 }
 
 export function AnalysisResults({ 
@@ -60,7 +62,8 @@ export function AnalysisResults({
   onLoadingChange, 
   initialData,
   onLoadAnalysis,
-  onAnalysisComplete 
+  onAnalysisComplete,
+  onResetSearch,
 }: AnalysisResultsProps) {
   const [data, setData] = useState<AnalysisData | null>(initialData || null);
   const [error, setError] = useState<string | null>(null);
@@ -212,6 +215,15 @@ export function AnalysisResults({
     }
   }, [analysisStartedAt, autoRecoveryCount, isResultForCurrentNiche, niche, onAnalysisComplete, onLoadingChange, playNotification, toast]);
 
+  const handleCancelAnalysis = useCallback(async () => {
+    await cancelCurrentLocalAnalysis();
+    setError(null);
+    setLoadingPhase("");
+    setSlowAnalysisNotice(false);
+    onLoadingChange(false);
+    onResetSearch?.();
+  }, [onLoadingChange, onResetSearch]);
+
   // Track if analysis has been triggered for current niche to prevent duplicates
   const [analysisTriggered, setAnalysisTriggered] = useState(false);
 
@@ -310,6 +322,17 @@ export function AnalysisResults({
                 L'analisi sta richiedendo piu tempo del previsto. Continuo a controllare i risultati in background: puoi lasciare aperta questa schermata.
               </p>
             )}
+            {onResetSearch && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleCancelAnalysis}
+                className="mt-4"
+              >
+                Interrompi analisi
+              </Button>
+            )}
           </div>
           
           <AnalysisProgressBar niche={niche} isLoading={isLoading} startedAt={analysisStartedAt} />
@@ -351,10 +374,17 @@ export function AnalysisResults({
               La ricerca salvata non ha piu un risultato attivo da mostrare. Puoi riprendere la raccolta verificata oppure avviare una nuova ricerca.
             </p>
           </div>
-          <Button onClick={runAnalysis} variant="default" className="gap-2">
-            <RefreshCw className="w-4 h-4" />
-            Riprendi analisi
-          </Button>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Button onClick={runAnalysis} variant="default" className="gap-2">
+              <RefreshCw className="w-4 h-4" />
+              Riprendi analisi
+            </Button>
+            {onResetSearch && (
+              <Button onClick={onResetSearch} variant="outline">
+                Nuova ricerca
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     );
